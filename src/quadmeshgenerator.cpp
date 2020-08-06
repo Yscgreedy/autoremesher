@@ -19,11 +19,19 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+#include <QElapsedTimer>
+#include <QDebug>
 #include "quadmeshgenerator.h"
 
 void QuadMeshGenerator::process()
 {
+    QElapsedTimer timer;
+    timer.start();
+    
     generate();
+    
+    auto timeUsed = timer.elapsed();
+    qDebug() << "Quad mesh generation took" << timeUsed << "milliseconds";
     
     emit finished();
 }

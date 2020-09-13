@@ -67,10 +67,6 @@ private:
     std::vector<std::vector<size_t>> m_remeshedQuads;
     double m_scaling = m_defaultScaling;
     
-    void buildEdgeToFaceMap(const std::vector<std::vector<size_t>> &triangles, 
-        std::map<std::pair<size_t, size_t>, size_t> &edgeToFaceMap);
-    void splitToIslands(const std::vector<std::vector<size_t>> &triangles, 
-        std::vector<std::vector<std::vector<size_t>>> &islands);
     static double calculateAverageEdgeLength(const std::vector<Vector3> &vertices,
         const std::vector<std::vector<size_t>> &faces);
 };

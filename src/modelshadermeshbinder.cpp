@@ -27,23 +27,21 @@
 #include <QDebug>
 #include <QDir>
 #include <QSurfaceFormat>
-#include "pbrshadermeshbinder.h"
+#include "modelshadermeshbinder.h"
 #include "ddsfile.h"
 
-PbrShaderMeshBinder::PbrShaderMeshBinder(bool toolEnabled) :
+ModelShaderMeshBinder::ModelShaderMeshBinder(bool toolEnabled) :
     m_toolEnabled(toolEnabled)
 {
 }
 
-PbrShaderMeshBinder::~PbrShaderMeshBinder()
+ModelShaderMeshBinder::~ModelShaderMeshBinder()
 {
     delete m_mesh;
     delete m_newMesh;
     delete m_texture;
     delete m_normalMap;
     delete m_metalnessRoughnessAmbientOcclusionMap;
-    delete m_environmentIrradianceMap;
-    delete m_environmentSpecularMap;
     delete m_toonNormalMap;
     delete m_toonDepthMap;
     delete m_newToonNormalMap;
@@ -52,7 +50,7 @@ PbrShaderMeshBinder::~PbrShaderMeshBinder()
     delete m_currentToonDepthMap;
 }
 
-void PbrShaderMeshBinder::updateMesh(PbrShaderMesh *mesh)
+void ModelShaderMeshBinder::updateMesh(ModelShaderMesh *mesh)
 {
     QMutexLocker lock(&m_newMeshMutex);
     if (mesh != m_mesh) {
@@ -62,40 +60,29 @@ void PbrShaderMeshBinder::updateMesh(PbrShaderMesh *mesh)
     }
 }
 
-void PbrShaderMeshBinder::reloadMesh()
+void ModelShaderMeshBinder::reloadMesh()
 {
-    PbrShaderMesh *mesh = nullptr;
+    ModelShaderMesh *mesh = nullptr;
     {
         QMutexLocker lock(&m_newMeshMutex);
         if (nullptr == m_mesh)
             return;
-        mesh = new PbrShaderMesh(*m_mesh);
+        mesh = new ModelShaderMesh(*m_mesh);
     }
     if (nullptr != mesh)
         updateMesh(mesh);
 }
 
-void PbrShaderMeshBinder::initialize()
+void ModelShaderMeshBinder::initialize()
 {
     m_vaoTriangle.create();
-    m_vaoEdge.create();
     if (m_toolEnabled)
         m_vaoTool.create();
 }
 
-void PbrShaderMeshBinder::enableEnvironmentLight()
+void ModelShaderMeshBinder::paint(ModelShaderProgram *program)
 {
-    m_environmentLightEnabled = true;
-}
-
-bool PbrShaderMeshBinder::isEnvironmentLightEnabled()
-{
-    return m_environmentLightEnabled;
-}
-
-void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
-{
-    PbrShaderMesh *newMesh = nullptr;
+    ModelShaderMesh *newMesh = nullptr;
     bool hasNewMesh = false;
     if (m_newMeshComing) {
         QMutexLocker lock(&m_newMeshMutex);
@@ -161,27 +148,13 @@ void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
                         (m_hasMetalnessMap || m_hasRoughnessMap || m_hasAmbientOcclusionMap))
                     m_metalnessRoughnessAmbientOcclusionMap = new QOpenGLTexture(*m_mesh->metalnessRoughnessAmbientOcclusionImage());
                 
-                delete m_environmentIrradianceMap;
-                m_environmentIrradianceMap = nullptr;
-                delete m_environmentSpecularMap;
-                m_environmentSpecularMap = nullptr;
-                if (program->isCoreProfile() && 
-                        m_environmentLightEnabled &&
-                        (m_hasMetalnessMap || m_hasRoughnessMap)) {
-                    DdsFileReader irradianceFile(":/resources/cedar_bridge_irradiance.dds");
-                    m_environmentIrradianceMap = irradianceFile.createOpenGLTexture();
-                    
-                    DdsFileReader specularFile(":/resources/cedar_bridge_specular.dds");
-                    m_environmentSpecularMap = specularFile.createOpenGLTexture();
-                }
-                
                 {
                     QOpenGLVertexArrayObject::Binder vaoBinder(&m_vaoTriangle);
                     if (m_vboTriangle.isCreated())
                         m_vboTriangle.destroy();
                     m_vboTriangle.create();
                     m_vboTriangle.bind();
-                    m_vboTriangle.allocate(m_mesh->triangleVertices(), m_mesh->triangleVertexCount() * sizeof(PbrShaderVertex));
+                    m_vboTriangle.allocate(m_mesh->triangleVertices(), m_mesh->triangleVertexCount() * sizeof(ModelShaderVertex));
                     m_renderTriangleVertexCount = m_mesh->triangleVertexCount();
                     QOpenGLFunctions *f = QOpenGLContext::currentContext()->functions();
                     f->glEnableVertexAttribArray(0);
@@ -192,42 +165,35 @@ void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
                     f->glEnableVertexAttribArray(5);
                     f->glEnableVertexAttribArray(6);
                     f->glEnableVertexAttribArray(7);
-                    f->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), 0);
-                    f->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(3 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(6 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(9 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(11 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(12 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(13 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(16 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), 0);
+                    f->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(3 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(6 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(9 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(11 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(12 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(13 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(16 * sizeof(GLfloat)));
                     m_vboTriangle.release();
                 }
                 {
-                    QOpenGLVertexArrayObject::Binder vaoBinder(&m_vaoEdge);
-                    if (m_vboEdge.isCreated())
-                        m_vboEdge.destroy();
-                    m_vboEdge.create();
-                    m_vboEdge.bind();
-                    m_vboEdge.allocate(m_mesh->edgeVertices(), m_mesh->edgeVertexCount() * sizeof(PbrShaderVertex));
-                    m_renderEdgeVertexCount = m_mesh->edgeVertexCount();
-                    QOpenGLFunctions *f = QOpenGLContext::currentContext()->functions();
-                    f->glEnableVertexAttribArray(0);
-                    f->glEnableVertexAttribArray(1);
-                    f->glEnableVertexAttribArray(2);
-                    f->glEnableVertexAttribArray(3);
-                    f->glEnableVertexAttribArray(4);
-                    f->glEnableVertexAttribArray(5);
-                    f->glEnableVertexAttribArray(6);
-                    f->glEnableVertexAttribArray(7);
-                    f->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), 0);
-                    f->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(3 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(6 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(9 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(11 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(12 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(13 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(16 * sizeof(GLfloat)));
-                    m_vboEdge.release();
+                    // Convert edge vertices from ModelShaderVertex to MonochromeOpenGLVertex
+                    int edgeCount = m_mesh->edgeVertexCount();
+                    if (edgeCount > 0) {
+                        const ModelShaderVertex *src = m_mesh->edgeVertices();
+                        std::vector<MonochromeOpenGLVertex> monochromeVertices(edgeCount);
+                        for (int i = 0; i < edgeCount; ++i) {
+                            monochromeVertices[i].posX = src[i].posX;
+                            monochromeVertices[i].posY = src[i].posY;
+                            monochromeVertices[i].posZ = src[i].posZ;
+                            monochromeVertices[i].colorR = 0.1137f;
+                            monochromeVertices[i].colorG = 0.098f;
+                            monochromeVertices[i].colorB = 0.0667f;
+                            monochromeVertices[i].alpha = 0.9f;
+                        }
+                        m_wireframeObject.update(monochromeVertices.data(), edgeCount);
+                    } else {
+                        m_wireframeObject.update(nullptr, 0);
+                    }
                 }
                 if (m_toolEnabled) {
                     QOpenGLVertexArrayObject::Binder vaoBinder(&m_vaoTool);
@@ -235,7 +201,7 @@ void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
                         m_vboTool.destroy();
                     m_vboTool.create();
                     m_vboTool.bind();
-                    m_vboTool.allocate(m_mesh->toolVertices(), m_mesh->toolVertexCount() * sizeof(PbrShaderVertex));
+                    m_vboTool.allocate(m_mesh->toolVertices(), m_mesh->toolVertexCount() * sizeof(ModelShaderVertex));
                     m_renderToolVertexCount = m_mesh->toolVertexCount();
                     QOpenGLFunctions *f = QOpenGLContext::currentContext()->functions();
                     f->glEnableVertexAttribArray(0);
@@ -246,49 +212,27 @@ void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
                     f->glEnableVertexAttribArray(5);
                     f->glEnableVertexAttribArray(6);
                     f->glEnableVertexAttribArray(7);
-                    f->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), 0);
-                    f->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(3 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(6 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(9 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(11 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(12 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(13 * sizeof(GLfloat)));
-                    f->glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(PbrShaderVertex), reinterpret_cast<void *>(16 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), 0);
+                    f->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(3 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(6 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(9 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(11 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(12 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(13 * sizeof(GLfloat)));
+                    f->glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ModelShaderVertex), reinterpret_cast<void *>(16 * sizeof(GLfloat)));
                     m_vboTool.release();
                 } else {
                     m_renderToolVertexCount = 0;
                 }
             } else {
                 m_renderTriangleVertexCount = 0;
-                m_renderEdgeVertexCount = 0;
                 m_renderToolVertexCount = 0;
             }
         }
     }
     program->setTextureIdValue(0);
     program->setNormalMapIdValue(1);
-    program->setMetalnessRoughnessAmbientOcclusionMapIdValue(2);
-    program->setEnvironmentIrradianceMapIdValue(3);
-    program->setEnvironmentSpecularMapIdValue(4);
-    if (m_showWireframe) {
-        if (m_renderEdgeVertexCount > 0) {
-            QOpenGLVertexArrayObject::Binder vaoBinder(&m_vaoEdge);
-			QOpenGLFunctions *f = QOpenGLContext::currentContext()->functions();
-            // glDrawArrays GL_LINES crashs on Mesa GL
-            if (program->isCoreProfile()) {
-                program->setTextureEnabledValue(0);
-                program->setNormalMapEnabledValue(0);
-                program->setMetalnessMapEnabledValue(0);
-                program->setRoughnessMapEnabledValue(0);
-                program->setAmbientOcclusionMapEnabledValue(0);
-                if (program->isCoreProfile()) {
-                    program->setEnvironmentIrradianceMapEnabledValue(0);
-                    program->setEnvironmentSpecularMapEnabledValue(0);
-                }
-                f->glDrawArrays(GL_LINES, 0, m_renderEdgeVertexCount);
-            }
-        }
-    }
+    program->setMetalnessRoughnessAoMapIdValue(2);
     if (m_renderTriangleVertexCount > 0) {
         QOpenGLVertexArrayObject::Binder vaoBinder(&m_vaoTriangle);
 		QOpenGLFunctions *f = QOpenGLContext::currentContext()->functions();
@@ -312,21 +256,7 @@ void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
 		}
         program->setMetalnessMapEnabledValue(m_hasMetalnessMap ? 1 : 0);
         program->setRoughnessMapEnabledValue(m_hasRoughnessMap ? 1 : 0);
-        program->setAmbientOcclusionMapEnabledValue(m_hasAmbientOcclusionMap ? 1 : 0);
-        if (program->isCoreProfile()) {
-            if (nullptr != m_environmentIrradianceMap) {
-                m_environmentIrradianceMap->bind(3);
-                program->setEnvironmentIrradianceMapEnabledValue(1);
-            } else {
-                program->setEnvironmentIrradianceMapEnabledValue(0);
-            }
-            if (nullptr != m_environmentSpecularMap) {
-                m_environmentSpecularMap->bind(4);
-                program->setEnvironmentSpecularMapEnabledValue(1);
-            } else {
-                program->setEnvironmentSpecularMapEnabledValue(0);
-            }
-        }
+        program->setAoMapEnabledValue(m_hasAmbientOcclusionMap ? 1 : 0);
         f->glDrawArrays(GL_TRIANGLES, 0, m_renderTriangleVertexCount);
     }
     if (m_toolEnabled) {
@@ -337,17 +267,13 @@ void PbrShaderMeshBinder::paint(PbrShaderProgram *program)
             program->setNormalMapEnabledValue(0);
             program->setMetalnessMapEnabledValue(0);
             program->setRoughnessMapEnabledValue(0);
-            program->setAmbientOcclusionMapEnabledValue(0);
-            if (program->isCoreProfile()) {
-                program->setEnvironmentIrradianceMapEnabledValue(0);
-                program->setEnvironmentSpecularMapEnabledValue(0);
-            }
+            program->setAoMapEnabledValue(0);
             f->glDrawArrays(GL_TRIANGLES, 0, m_renderToolVertexCount);
         }
     }
 }
 
-void PbrShaderMeshBinder::fetchCurrentToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
+void ModelShaderMeshBinder::fetchCurrentToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
 {
     QMutexLocker lock(&m_toonNormalAndDepthMapMutex);
     if (nullptr != normalMap && nullptr != m_currentToonNormalMap)
@@ -356,7 +282,7 @@ void PbrShaderMeshBinder::fetchCurrentToonNormalAndDepthMaps(QImage *normalMap, 
         *depthMap = *m_currentToonDepthMap;
 }
 
-void PbrShaderMeshBinder::updateToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
+void ModelShaderMeshBinder::updateToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
 {
     QMutexLocker lock(&m_toonNormalAndDepthMapMutex);
     
@@ -369,12 +295,19 @@ void PbrShaderMeshBinder::updateToonNormalAndDepthMaps(QImage *normalMap, QImage
     m_newToonMapsComing = true;
 }
 
-void PbrShaderMeshBinder::cleanup()
+void ModelShaderMeshBinder::paintWireframe()
+{
+    if (!m_showWireframe)
+        return;
+
+    m_wireframeObject.draw();
+}
+
+void ModelShaderMeshBinder::cleanup()
 {
     if (m_vboTriangle.isCreated())
         m_vboTriangle.destroy();
-    if (m_vboEdge.isCreated())
-        m_vboEdge.destroy();
+    m_wireframeObject.cleanup();
     if (m_toolEnabled) {
         if (m_vboTool.isCreated())
             m_vboTool.destroy();
@@ -385,27 +318,23 @@ void PbrShaderMeshBinder::cleanup()
     m_normalMap = nullptr;
     delete m_metalnessRoughnessAmbientOcclusionMap;
     m_metalnessRoughnessAmbientOcclusionMap = nullptr;
-    delete m_environmentIrradianceMap;
-    m_environmentIrradianceMap = nullptr;
-    delete m_environmentSpecularMap;
-    m_environmentSpecularMap = nullptr;
     delete m_toonNormalMap;
     m_toonNormalMap = nullptr;
     delete m_toonDepthMap;
     m_toonDepthMap = nullptr;
 }
 
-void PbrShaderMeshBinder::showWireframe()
+void ModelShaderMeshBinder::showWireframe()
 {
     m_showWireframe = true;
 }
 
-void PbrShaderMeshBinder::hideWireframe()
+void ModelShaderMeshBinder::hideWireframe()
 {
     m_showWireframe = false;
 }
 
-bool PbrShaderMeshBinder::isWireframeVisible()
+bool ModelShaderMeshBinder::isWireframeVisible()
 {
     return m_showWireframe;
 }

@@ -19,8 +19,8 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
-#ifndef AUTO_REMESHER_PBR_SHADER_WIDGET_H
-#define AUTO_REMESHER_PBR_SHADER_WIDGET_H
+#ifndef AUTO_REMESHER_MODEL_SHADER_WIDGET_H
+#define AUTO_REMESHER_MODEL_SHADER_WIDGET_H
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLVertexArrayObject>
@@ -29,11 +29,12 @@
 #include <QMutex>
 #include <QVector2D>
 #include <QTimer>
-#include "pbrshadermesh.h"
-#include "pbrshaderprogram.h"
-#include "pbrshadermeshbinder.h"
+#include "modelshadermesh.h"
+#include "modelshaderprogram.h"
+#include "modelshadermeshbinder.h"
+#include "monochromeopenglprogram.h"
 
-class PbrShaderWidget : public QOpenGLWidget, protected QOpenGLFunctions
+class ModelShaderWidget : public QOpenGLWidget, protected QOpenGLFunctions
 {
     Q_OBJECT
 signals:
@@ -48,8 +49,8 @@ signals:
     void eyePositionChanged(const QVector3D &eyePosition);
     void moveToPositionChanged(const QVector3D &moveToPosition);
 public:
-    PbrShaderWidget(QWidget *parent = 0);
-    ~PbrShaderWidget();
+    ModelShaderWidget(QWidget *parent = 0);
+    ~ModelShaderWidget();
     static bool isTransparent()
     {
         return m_transparent;
@@ -58,13 +59,11 @@ public:
     {
         m_transparent = t;
     }
-    void updateMesh(PbrShaderMesh *mesh);
+    void updateMesh(ModelShaderMesh *mesh);
     void toggleWireframe();
     bool isWireframeVisible();
     void toggleRotation();
     void toggleUvCheck();
-    void enableEnvironmentLight();
-    bool isEnvironmentLightEnabled();
     void enableMove(bool enabled);
     void enableZoom(bool enabled);
     void enableMousePicking(bool enabled);
@@ -109,14 +108,15 @@ private:
     int m_xRotation = m_defaultXRotation;
     int m_yRotation = m_defaultYRotation;
     int m_zRotation = m_defaultZRotation;
-    PbrShaderProgram *m_program = nullptr;
+    ModelShaderProgram *m_program = nullptr;
+    MonochromeOpenGLProgram *m_monochromeProgram = nullptr;
     bool m_moveStarted = false;
     bool m_moveEnabled = true;
     bool m_zoomEnabled = true;
     bool m_mousePickingEnabled = false;
     QVector3D m_mousePickTargetPositionInModelSpace;
     QPoint m_lastPos;
-    PbrShaderMeshBinder m_meshBinder;
+    ModelShaderMeshBinder m_meshBinder;
     QMatrix4x4 m_projection;
     QMatrix4x4 m_camera;
     QMatrix4x4 m_world;

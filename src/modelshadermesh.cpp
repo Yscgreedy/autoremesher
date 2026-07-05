@@ -22,30 +22,30 @@
 #include <QTextStream>
 #include <QFile>
 #include <cmath>
-#include "pbrshadermesh.h"
+#include "modelshadermesh.h"
 
-float PbrShaderMesh::m_defaultMetalness = 0.0;
-float PbrShaderMesh::m_defaultRoughness = 1.0;
+float ModelShaderMesh::m_defaultMetalness = 0.0;
+float ModelShaderMesh::m_defaultRoughness = 1.0;
 
-PbrShaderMesh::PbrShaderMesh(const PbrShaderMesh &mesh)
+ModelShaderMesh::ModelShaderMesh(const ModelShaderMesh &mesh)
 {
     if (nullptr != mesh.m_triangleVertices &&
             mesh.m_triangleVertexCount > 0) {
-        this->m_triangleVertices = new PbrShaderVertex[mesh.m_triangleVertexCount];
+        this->m_triangleVertices = new ModelShaderVertex[mesh.m_triangleVertexCount];
         this->m_triangleVertexCount = mesh.m_triangleVertexCount;
         for (int i = 0; i < mesh.m_triangleVertexCount; i++)
             this->m_triangleVertices[i] = mesh.m_triangleVertices[i];
     }
     if (nullptr != mesh.m_edgeVertices &&
             mesh.m_edgeVertexCount > 0) {
-        this->m_edgeVertices = new PbrShaderVertex[mesh.m_edgeVertexCount];
+        this->m_edgeVertices = new ModelShaderVertex[mesh.m_edgeVertexCount];
         this->m_edgeVertexCount = mesh.m_edgeVertexCount;
         for (int i = 0; i < mesh.m_edgeVertexCount; i++)
             this->m_edgeVertices[i] = mesh.m_edgeVertices[i];
     }
     if (nullptr != mesh.m_toolVertices &&
             mesh.m_toolVertexCount > 0) {
-        this->m_toolVertices = new PbrShaderVertex[mesh.m_toolVertexCount];
+        this->m_toolVertices = new ModelShaderVertex[mesh.m_toolVertexCount];
         this->m_toolVertexCount = mesh.m_toolVertexCount;
         for (int i = 0; i < mesh.m_toolVertexCount; i++)
             this->m_toolVertices[i] = mesh.m_toolVertices[i];
@@ -67,7 +67,7 @@ PbrShaderMesh::PbrShaderMesh(const PbrShaderMesh &mesh)
     this->m_meshId = mesh.meshId();
 }
 
-void PbrShaderMesh::removeColor()
+void ModelShaderMesh::removeColor()
 {
     delete this->m_textureImage;
     this->m_textureImage = nullptr;
@@ -85,12 +85,12 @@ void PbrShaderMesh::removeColor()
     for (int i = 0; i < this->m_triangleVertexCount; ++i) {
         auto &vertex = this->m_triangleVertices[i];
         vertex.colorR = 1.0;
-        vertex.colorG = 1.0;
-        vertex.colorB = 1.0;
+        vertex.colorG = 0.996;
+        vertex.colorB = 0.890;
     }
 }
 
-PbrShaderMesh::PbrShaderMesh(PbrShaderVertex *triangleVertices, int vertexNum, PbrShaderVertex *edgeVertices, int edgeVertexCount,
+ModelShaderMesh::ModelShaderMesh(ModelShaderVertex *triangleVertices, int vertexNum, ModelShaderVertex *edgeVertices, int edgeVertexCount,
         std::vector<AutoRemesher::Vector3> *vertices, std::vector<std::vector<size_t>> *faces) :
     m_triangleVertices(triangleVertices),
     m_triangleVertexCount(vertexNum),
@@ -103,7 +103,7 @@ PbrShaderMesh::PbrShaderMesh(PbrShaderVertex *triangleVertices, int vertexNum, P
         m_faces = *faces;
 }
 
-PbrShaderMesh::PbrShaderMesh(const std::vector<AutoRemesher::Vector3> &vertices, const std::vector<std::vector<size_t>> &triangles,
+ModelShaderMesh::ModelShaderMesh(const std::vector<AutoRemesher::Vector3> &vertices, const std::vector<std::vector<size_t>> &triangles,
     const std::vector<std::vector<AutoRemesher::Vector3>> &triangleVertexNormals,
     const QColor &color)
 {
@@ -111,14 +111,14 @@ PbrShaderMesh::PbrShaderMesh(const std::vector<AutoRemesher::Vector3> &vertices,
     m_faces = triangles;
     
     m_triangleVertexCount = (int)triangles.size() * 3;
-    m_triangleVertices = new PbrShaderVertex[m_triangleVertexCount];
+    m_triangleVertices = new ModelShaderVertex[m_triangleVertexCount];
     int destIndex = 0;
     for (size_t i = 0; i < triangles.size(); ++i) {
         for (auto j = 0; j < 3; j++) {
             int vertexIndex = (int)triangles[i][j];
             const AutoRemesher::Vector3 *srcVert = &vertices[vertexIndex];
             const AutoRemesher::Vector3 *srcNormal = &(triangleVertexNormals)[i][j];
-            PbrShaderVertex *dest = &m_triangleVertices[destIndex];
+            ModelShaderVertex *dest = &m_triangleVertices[destIndex];
             dest->colorR = color.redF();
             dest->colorG = color.greenF();
             dest->colorB = color.blueF();
@@ -142,11 +142,11 @@ PbrShaderMesh::PbrShaderMesh(const std::vector<AutoRemesher::Vector3> &vertices,
     }
 }
 
-PbrShaderMesh::PbrShaderMesh()
+ModelShaderMesh::ModelShaderMesh()
 {
 }
 
-PbrShaderMesh::~PbrShaderMesh()
+ModelShaderMesh::~ModelShaderMesh()
 {
     delete[] m_triangleVertices;
     m_triangleVertexCount = 0;
@@ -159,107 +159,107 @@ PbrShaderMesh::~PbrShaderMesh()
     delete m_metalnessRoughnessAmbientOcclusionImage;
 }
 
-const std::vector<AutoRemesher::Vector3> &PbrShaderMesh::vertices()
+const std::vector<AutoRemesher::Vector3> &ModelShaderMesh::vertices()
 {
     return m_vertices;
 }
 
-const std::vector<std::vector<size_t>> &PbrShaderMesh::faces()
+const std::vector<std::vector<size_t>> &ModelShaderMesh::faces()
 {
     return m_faces;
 }
 
-PbrShaderVertex *PbrShaderMesh::triangleVertices()
+ModelShaderVertex *ModelShaderMesh::triangleVertices()
 {
     return m_triangleVertices;
 }
 
-int PbrShaderMesh::triangleVertexCount()
+int ModelShaderMesh::triangleVertexCount()
 {
     return m_triangleVertexCount;
 }
 
-PbrShaderVertex *PbrShaderMesh::edgeVertices()
+ModelShaderVertex *ModelShaderMesh::edgeVertices()
 {
     return m_edgeVertices;
 }
 
-int PbrShaderMesh::edgeVertexCount()
+int ModelShaderMesh::edgeVertexCount()
 {
     return m_edgeVertexCount;
 }
 
-PbrShaderVertex *PbrShaderMesh::toolVertices()
+ModelShaderVertex *ModelShaderMesh::toolVertices()
 {
     return m_toolVertices;
 }
 
-int PbrShaderMesh::toolVertexCount()
+int ModelShaderMesh::toolVertexCount()
 {
     return m_toolVertexCount;
 }
 
-void PbrShaderMesh::setTextureImage(QImage *textureImage)
+void ModelShaderMesh::setTextureImage(QImage *textureImage)
 {
     m_textureImage = textureImage;
 }
 
-const QImage *PbrShaderMesh::textureImage()
+const QImage *ModelShaderMesh::textureImage()
 {
     return m_textureImage;
 }
 
-void PbrShaderMesh::setNormalMapImage(QImage *normalMapImage)
+void ModelShaderMesh::setNormalMapImage(QImage *normalMapImage)
 {
     m_normalMapImage = normalMapImage;
 }
 
-const QImage *PbrShaderMesh::normalMapImage()
+const QImage *ModelShaderMesh::normalMapImage()
 {
     return m_normalMapImage;
 }
 
-const QImage *PbrShaderMesh::metalnessRoughnessAmbientOcclusionImage()
+const QImage *ModelShaderMesh::metalnessRoughnessAmbientOcclusionImage()
 {
     return m_metalnessRoughnessAmbientOcclusionImage;
 }
 
-void PbrShaderMesh::setMetalnessRoughnessAmbientOcclusionImage(QImage *image)
+void ModelShaderMesh::setMetalnessRoughnessAmbientOcclusionImage(QImage *image)
 {
     m_metalnessRoughnessAmbientOcclusionImage = image;
 }
 
-bool PbrShaderMesh::hasMetalnessInImage()
+bool ModelShaderMesh::hasMetalnessInImage()
 {
     return m_hasMetalnessInImage;
 }
 
-void PbrShaderMesh::setHasMetalnessInImage(bool hasInImage)
+void ModelShaderMesh::setHasMetalnessInImage(bool hasInImage)
 {
     m_hasMetalnessInImage = hasInImage;
 }
 
-bool PbrShaderMesh::hasRoughnessInImage()
+bool ModelShaderMesh::hasRoughnessInImage()
 {
     return m_hasRoughnessInImage;
 }
 
-void PbrShaderMesh::setHasRoughnessInImage(bool hasInImage)
+void ModelShaderMesh::setHasRoughnessInImage(bool hasInImage)
 {
     m_hasRoughnessInImage = hasInImage;
 }
 
-bool PbrShaderMesh::hasAmbientOcclusionInImage()
+bool ModelShaderMesh::hasAmbientOcclusionInImage()
 {
     return m_hasAmbientOcclusionInImage;
 }
 
-void PbrShaderMesh::setHasAmbientOcclusionInImage(bool hasInImage)
+void ModelShaderMesh::setHasAmbientOcclusionInImage(bool hasInImage)
 {
     m_hasAmbientOcclusionInImage = hasInImage;
 }
 
-void PbrShaderMesh::updateTool(PbrShaderVertex *toolVertices, int vertexNum)
+void ModelShaderMesh::updateTool(ModelShaderVertex *toolVertices, int vertexNum)
 {
     delete[] m_toolVertices;
     m_toolVertices = nullptr;
@@ -269,7 +269,7 @@ void PbrShaderMesh::updateTool(PbrShaderVertex *toolVertices, int vertexNum)
     m_toolVertexCount = vertexNum;
 }
 
-void PbrShaderMesh::updateEdges(PbrShaderVertex *edgeVertices, int edgeVertexCount)
+void ModelShaderMesh::updateEdges(ModelShaderVertex *edgeVertices, int edgeVertexCount)
 {
     delete[] m_edgeVertices;
     m_edgeVertices = nullptr;
@@ -279,7 +279,7 @@ void PbrShaderMesh::updateEdges(PbrShaderVertex *edgeVertices, int edgeVertexCou
     m_edgeVertexCount = edgeVertexCount;
 }
 
-void PbrShaderMesh::updateTriangleVertices(PbrShaderVertex *triangleVertices, int triangleVertexCount)
+void ModelShaderMesh::updateTriangleVertices(ModelShaderVertex *triangleVertices, int triangleVertexCount)
 {
     delete[] m_triangleVertices;
     m_triangleVertices = 0;
@@ -289,12 +289,12 @@ void PbrShaderMesh::updateTriangleVertices(PbrShaderVertex *triangleVertices, in
     m_triangleVertexCount = triangleVertexCount;
 }
 
-quint64 PbrShaderMesh::meshId() const
+quint64 ModelShaderMesh::meshId() const
 {
     return m_meshId;
 }
 
-void PbrShaderMesh::setMeshId(quint64 id)
+void ModelShaderMesh::setMeshId(quint64 id)
 {
     m_meshId = id;
 }

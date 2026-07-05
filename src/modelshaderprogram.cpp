@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2020 Jeremy HU <jeremy-at-dust3d dot org>. All rights reserved. 
+ *  Copyright (c) 2020 Jeremy HU <jeremy-at-dust3d dot org>. All rights reserved.
  *
  *  Permission is hereby granted, free of charge, to any person obtaining a copy
  *  of this software and associated documentation files (the "Software"), to deal
@@ -21,15 +21,14 @@
  */
 #include <QFile>
 #include <map>
-#include "pbrshaderprogram.h"
+#include "modelshaderprogram.h"
 
-const QString &PbrShaderProgram::loadShaderSource(const QString &name)
+const QString &ModelShaderProgram::loadShaderSource(const QString &name)
 {
     static std::map<QString, QString> s_shaderSources;
     auto findShader = s_shaderSources.find(name);
-    if (findShader != s_shaderSources.end()) {
+    if (findShader != s_shaderSources.end())
         return findShader->second;
-    }
     QFile file(name);
     file.open(QFile::ReadOnly | QFile::Text);
     QTextStream stream(&file);
@@ -37,20 +36,20 @@ const QString &PbrShaderProgram::loadShaderSource(const QString &name)
     return insertResult.first->second;
 }
 
-bool PbrShaderProgram::isCoreProfile()
+bool ModelShaderProgram::isCoreProfile()
 {
     return m_isCoreProfile;
 }
 
-PbrShaderProgram::PbrShaderProgram(bool isCoreProfile)
+ModelShaderProgram::ModelShaderProgram(bool isCoreProfile)
 {
     if (isCoreProfile) {
-        this->addShaderFromSourceCode(QOpenGLShader::Vertex, loadShaderSource(":/shaders/pbr.core.vert"));
-        this->addShaderFromSourceCode(QOpenGLShader::Fragment, loadShaderSource(":/shaders/pbr.core.frag"));
+        this->addShaderFromSourceCode(QOpenGLShader::Vertex, loadShaderSource(":/shaders/model.core.vert"));
+        this->addShaderFromSourceCode(QOpenGLShader::Fragment, loadShaderSource(":/shaders/model.core.frag"));
         m_isCoreProfile = true;
     } else {
-        this->addShaderFromSourceCode(QOpenGLShader::Vertex, loadShaderSource(":/shaders/pbr.vert"));
-        this->addShaderFromSourceCode(QOpenGLShader::Fragment, loadShaderSource(":/shaders/pbr.frag"));
+        this->addShaderFromSourceCode(QOpenGLShader::Vertex, loadShaderSource(":/shaders/model.vert"));
+        this->addShaderFromSourceCode(QOpenGLShader::Fragment, loadShaderSource(":/shaders/model.frag"));
     }
     this->bindAttributeLocation("vertex", 0);
     this->bindAttributeLocation("normal", 1);
@@ -67,127 +66,101 @@ PbrShaderProgram::PbrShaderProgram(bool isCoreProfile)
     m_modelMatrixLoc = this->uniformLocation("modelMatrix");
     m_normalMatrixLoc = this->uniformLocation("normalMatrix");
     m_viewMatrixLoc = this->uniformLocation("viewMatrix");
-    m_eyePosLoc = this->uniformLocation("eyePos");
+    m_eyePositionLoc = this->uniformLocation("eyePosition");
     m_textureIdLoc = this->uniformLocation("textureId");
     m_textureEnabledLoc = this->uniformLocation("textureEnabled");
     m_normalMapIdLoc = this->uniformLocation("normalMapId");
     m_normalMapEnabledLoc = this->uniformLocation("normalMapEnabled");
     m_metalnessMapEnabledLoc = this->uniformLocation("metalnessMapEnabled");
     m_roughnessMapEnabledLoc = this->uniformLocation("roughnessMapEnabled");
-    m_ambientOcclusionMapEnabledLoc = this->uniformLocation("ambientOcclusionMapEnabled");
-    m_metalnessRoughnessAmbientOcclusionMapIdLoc = this->uniformLocation("metalnessRoughnessAmbientOcclusionMapId");
+    m_aoMapEnabledLoc = this->uniformLocation("aoMapEnabled");
+    m_metalnessRoughnessAoMapIdLoc = this->uniformLocation("metalnessRoughnessAoMapId");
     m_mousePickEnabledLoc = this->uniformLocation("mousePickEnabled");
     m_mousePickTargetPositionLoc = this->uniformLocation("mousePickTargetPosition");
     m_mousePickRadiusLoc = this->uniformLocation("mousePickRadius");
-    if (m_isCoreProfile) {
-        m_environmentIrradianceMapIdLoc = this->uniformLocation("environmentIrradianceMapId");
-        m_environmentIrradianceMapEnabledLoc = this->uniformLocation("environmentIrradianceMapEnabled");
-        m_environmentSpecularMapIdLoc = this->uniformLocation("environmentSpecularMapId");
-        m_environmentSpecularMapEnabledLoc = this->uniformLocation("environmentSpecularMapEnabled");
-    }
 }
 
-int PbrShaderProgram::projectionMatrixLoc()
+int ModelShaderProgram::projectionMatrixLoc()
 {
     return m_projectionMatrixLoc;
 }
 
-int PbrShaderProgram::modelMatrixLoc()
+int ModelShaderProgram::modelMatrixLoc()
 {
     return m_modelMatrixLoc;
 }
 
-int PbrShaderProgram::normalMatrixLoc()
+int ModelShaderProgram::normalMatrixLoc()
 {
     return m_normalMatrixLoc;
 }
 
-int PbrShaderProgram::viewMatrixLoc()
+int ModelShaderProgram::viewMatrixLoc()
 {
     return m_viewMatrixLoc;
 }
 
-int PbrShaderProgram::eyePosLoc()
+int ModelShaderProgram::eyePositionLoc()
 {
-    return m_eyePosLoc;
+    return m_eyePositionLoc;
 }
 
-int PbrShaderProgram::textureEnabledLoc()
+int ModelShaderProgram::textureEnabledLoc()
 {
     return m_textureEnabledLoc;
 }
 
-int PbrShaderProgram::textureIdLoc()
+int ModelShaderProgram::textureIdLoc()
 {
     return m_textureIdLoc;
 }
 
-int PbrShaderProgram::normalMapEnabledLoc()
+int ModelShaderProgram::normalMapEnabledLoc()
 {
     return m_normalMapEnabledLoc;
 }
 
-int PbrShaderProgram::normalMapIdLoc()
+int ModelShaderProgram::normalMapIdLoc()
 {
     return m_normalMapIdLoc;
 }
 
-int PbrShaderProgram::metalnessMapEnabledLoc()
+int ModelShaderProgram::metalnessMapEnabledLoc()
 {
     return m_metalnessMapEnabledLoc;
 }
 
-int PbrShaderProgram::roughnessMapEnabledLoc()
+int ModelShaderProgram::roughnessMapEnabledLoc()
 {
     return m_roughnessMapEnabledLoc;
 }
 
-int PbrShaderProgram::ambientOcclusionMapEnabledLoc()
+int ModelShaderProgram::aoMapEnabledLoc()
 {
-    return m_ambientOcclusionMapEnabledLoc;
+    return m_aoMapEnabledLoc;
 }
 
-int PbrShaderProgram::metalnessRoughnessAmbientOcclusionMapIdLoc()
+int ModelShaderProgram::metalnessRoughnessAoMapIdLoc()
 {
-    return m_metalnessRoughnessAmbientOcclusionMapIdLoc;
+    return m_metalnessRoughnessAoMapIdLoc;
 }
 
-int PbrShaderProgram::mousePickEnabledLoc()
+int ModelShaderProgram::mousePickEnabledLoc()
 {
     return m_mousePickEnabledLoc;
 }
 
-int PbrShaderProgram::mousePickTargetPositionLoc()
+int ModelShaderProgram::mousePickTargetPositionLoc()
 {
     return m_mousePickTargetPositionLoc;
 }
 
-int PbrShaderProgram::mousePickRadiusLoc()
+int ModelShaderProgram::mousePickRadiusLoc()
 {
     return m_mousePickRadiusLoc;
 }
 
-int PbrShaderProgram::environmentIrradianceMapIdLoc()
-{
-    return m_environmentIrradianceMapIdLoc;
-}
-
-int PbrShaderProgram::environmentIrradianceMapEnabledLoc()
-{
-    return m_environmentIrradianceMapEnabledLoc;
-}
-
-int PbrShaderProgram::environmentSpecularMapIdLoc()
-{
-    return m_environmentSpecularMapIdLoc;
-}
-
-int PbrShaderProgram::environmentSpecularMapEnabledLoc()
-{
-    return m_environmentSpecularMapEnabledLoc;
-}
-
-void PbrShaderProgram::setProjectionMatrixValue(const QMatrix4x4 &value)
+void ModelShaderProgram::setProjectionMatrixValue(const QMatrix4x4 &value)
 {
     if (value == m_projectionMatrixValue)
         return;
@@ -195,7 +168,7 @@ void PbrShaderProgram::setProjectionMatrixValue(const QMatrix4x4 &value)
     setUniformValue(m_projectionMatrixLoc, m_projectionMatrixValue);
 }
 
-void PbrShaderProgram::setModelMatrixValue(const QMatrix4x4 &value)
+void ModelShaderProgram::setModelMatrixValue(const QMatrix4x4 &value)
 {
     if (value == m_modelMatrixValue)
         return;
@@ -203,7 +176,7 @@ void PbrShaderProgram::setModelMatrixValue(const QMatrix4x4 &value)
     setUniformValue(m_modelMatrixLoc, m_modelMatrixValue);
 }
 
-void PbrShaderProgram::setNormalMatrixValue(const QMatrix3x3 &value)
+void ModelShaderProgram::setNormalMatrixValue(const QMatrix3x3 &value)
 {
     if (value == m_normalMatrixValue)
         return;
@@ -211,7 +184,7 @@ void PbrShaderProgram::setNormalMatrixValue(const QMatrix3x3 &value)
     setUniformValue(m_normalMatrixLoc, m_normalMatrixValue);
 }
 
-void PbrShaderProgram::setViewMatrixValue(const QMatrix4x4 &value)
+void ModelShaderProgram::setViewMatrixValue(const QMatrix4x4 &value)
 {
     if (value == m_viewMatrixValue)
         return;
@@ -219,15 +192,15 @@ void PbrShaderProgram::setViewMatrixValue(const QMatrix4x4 &value)
     setUniformValue(m_viewMatrixLoc, m_viewMatrixValue);
 }
 
-void PbrShaderProgram::setEyePosValue(const QVector3D &value)
+void ModelShaderProgram::setEyePositionValue(const QVector3D &value)
 {
-    if (qFuzzyCompare(value, m_eyePosValue))
+    if (qFuzzyCompare(value, m_eyePositionValue))
         return;
-    m_eyePosValue = value;
-    setUniformValue(m_eyePosLoc, m_eyePosValue);
+    m_eyePositionValue = value;
+    setUniformValue(m_eyePositionLoc, m_eyePositionValue);
 }
 
-void PbrShaderProgram::setTextureIdValue(int value)
+void ModelShaderProgram::setTextureIdValue(int value)
 {
     if (value == m_textureIdValue)
         return;
@@ -235,7 +208,7 @@ void PbrShaderProgram::setTextureIdValue(int value)
     setUniformValue(m_textureIdLoc, m_textureIdValue);
 }
 
-void PbrShaderProgram::setTextureEnabledValue(int value)
+void ModelShaderProgram::setTextureEnabledValue(int value)
 {
     if (value == m_textureEnabledValue)
         return;
@@ -243,7 +216,7 @@ void PbrShaderProgram::setTextureEnabledValue(int value)
     setUniformValue(m_textureEnabledLoc, m_textureEnabledValue);
 }
 
-void PbrShaderProgram::setNormalMapEnabledValue(int value)
+void ModelShaderProgram::setNormalMapEnabledValue(int value)
 {
     if (value == m_normalMapEnabledValue)
         return;
@@ -251,7 +224,7 @@ void PbrShaderProgram::setNormalMapEnabledValue(int value)
     setUniformValue(m_normalMapEnabledLoc, m_normalMapEnabledValue);
 }
 
-void PbrShaderProgram::setNormalMapIdValue(int value)
+void ModelShaderProgram::setNormalMapIdValue(int value)
 {
     if (value == m_normalMapIdValue)
         return;
@@ -259,7 +232,7 @@ void PbrShaderProgram::setNormalMapIdValue(int value)
     setUniformValue(m_normalMapIdLoc, m_normalMapIdValue);
 }
 
-void PbrShaderProgram::setMetalnessMapEnabledValue(int value)
+void ModelShaderProgram::setMetalnessMapEnabledValue(int value)
 {
     if (value == m_metalnessMapEnabledValue)
         return;
@@ -267,7 +240,7 @@ void PbrShaderProgram::setMetalnessMapEnabledValue(int value)
     setUniformValue(m_metalnessMapEnabledLoc, m_metalnessMapEnabledValue);
 }
 
-void PbrShaderProgram::setRoughnessMapEnabledValue(int value)
+void ModelShaderProgram::setRoughnessMapEnabledValue(int value)
 {
     if (value == m_roughnessMapEnabledValue)
         return;
@@ -275,23 +248,23 @@ void PbrShaderProgram::setRoughnessMapEnabledValue(int value)
     setUniformValue(m_roughnessMapEnabledLoc, m_roughnessMapEnabledValue);
 }
 
-void PbrShaderProgram::setAmbientOcclusionMapEnabledValue(int value)
+void ModelShaderProgram::setAoMapEnabledValue(int value)
 {
-    if (value == m_ambientOcclusionMapEnabledValue)
+    if (value == m_aoMapEnabledValue)
         return;
-    m_ambientOcclusionMapEnabledValue = value;
-    setUniformValue(m_ambientOcclusionMapEnabledLoc, m_ambientOcclusionMapEnabledValue);
+    m_aoMapEnabledValue = value;
+    setUniformValue(m_aoMapEnabledLoc, m_aoMapEnabledValue);
 }
 
-void PbrShaderProgram::setMetalnessRoughnessAmbientOcclusionMapIdValue(int value)
+void ModelShaderProgram::setMetalnessRoughnessAoMapIdValue(int value)
 {
-    if (value == m_metalnessRoughnessAmbientOcclusionMapIdValue)
+    if (value == m_metalnessRoughnessAoMapIdValue)
         return;
-    m_metalnessRoughnessAmbientOcclusionMapIdValue = value;
-    setUniformValue(m_metalnessRoughnessAmbientOcclusionMapIdLoc, m_metalnessRoughnessAmbientOcclusionMapIdValue);
+    m_metalnessRoughnessAoMapIdValue = value;
+    setUniformValue(m_metalnessRoughnessAoMapIdLoc, m_metalnessRoughnessAoMapIdValue);
 }
 
-void PbrShaderProgram::setMousePickEnabledValue(int value)
+void ModelShaderProgram::setMousePickEnabledValue(int value)
 {
     if (value == m_mousePickEnabledValue)
         return;
@@ -299,7 +272,7 @@ void PbrShaderProgram::setMousePickEnabledValue(int value)
     setUniformValue(m_mousePickEnabledLoc, m_mousePickEnabledValue);
 }
 
-void PbrShaderProgram::setMousePickTargetPositionValue(const QVector3D &value)
+void ModelShaderProgram::setMousePickTargetPositionValue(const QVector3D &value)
 {
     if (qFuzzyCompare(value, m_mousePickTargetPositionValue))
         return;
@@ -307,42 +280,10 @@ void PbrShaderProgram::setMousePickTargetPositionValue(const QVector3D &value)
     setUniformValue(m_mousePickTargetPositionLoc, m_mousePickTargetPositionValue);
 }
 
-void PbrShaderProgram::setMousePickRadiusValue(float value)
+void ModelShaderProgram::setMousePickRadiusValue(float value)
 {
     if (qFuzzyCompare(value, m_mousePickRadiusValue))
         return;
     m_mousePickRadiusValue = value;
     setUniformValue(m_mousePickRadiusLoc, m_mousePickRadiusValue);
-}
-
-void PbrShaderProgram::setEnvironmentIrradianceMapIdValue(int value)
-{
-    if (value == m_environmentIrradianceMapIdValue)
-        return;
-    m_environmentIrradianceMapIdValue = value;
-    setUniformValue(m_environmentIrradianceMapIdLoc, m_environmentIrradianceMapIdValue);
-}
-
-void PbrShaderProgram::setEnvironmentIrradianceMapEnabledValue(int value)
-{
-    if (value == m_environmentIrradianceMapEnabledValue)
-        return;
-    m_environmentIrradianceMapEnabledValue = value;
-    setUniformValue(m_environmentIrradianceMapEnabledLoc, m_environmentIrradianceMapEnabledValue);
-}
-
-void PbrShaderProgram::setEnvironmentSpecularMapIdValue(int value)
-{
-    if (value == m_environmentSpecularMapIdValue)
-        return;
-    m_environmentSpecularMapIdValue = value;
-    setUniformValue(m_environmentSpecularMapIdLoc, m_environmentSpecularMapIdValue);
-}
-
-void PbrShaderProgram::setEnvironmentSpecularMapEnabledValue(int value)
-{
-    if (value == m_environmentSpecularMapEnabledValue)
-        return;
-    m_environmentSpecularMapEnabledValue = value;
-    setUniformValue(m_environmentSpecularMapEnabledLoc, m_environmentSpecularMapEnabledValue);
 }

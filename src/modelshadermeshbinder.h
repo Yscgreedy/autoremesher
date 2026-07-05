@@ -19,38 +19,38 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
-#ifndef AUTO_REMESHER_PBR_SHADER_MESH_BINDER_H
-#define AUTO_REMESHER_PBR_SHADER_MESH_BINDER_H
+#ifndef AUTO_REMESHER_MODEL_SHADER_MESH_BINDER_H
+#define AUTO_REMESHER_MODEL_SHADER_MESH_BINDER_H
 #include <QOpenGLVertexArrayObject>
 #include <QMutex>
 #include <QOpenGLBuffer>
 #include <QString>
 #include <QOpenGLTexture>
-#include "pbrshadermesh.h"
-#include "pbrshaderprogram.h"
+#include "modelshadermesh.h"
+#include "modelshaderprogram.h"
+#include "monochromeopenglobject.h"
+#include "monochromeopenglprogram.h"
 
-class PbrShaderMeshBinder
+class ModelShaderMeshBinder
 {
 public:
-    PbrShaderMeshBinder(bool toolEnabled=false);
-    ~PbrShaderMeshBinder();
-    void updateMesh(PbrShaderMesh *mesh);
+    ModelShaderMeshBinder(bool toolEnabled=false);
+    ~ModelShaderMeshBinder();
+    void updateMesh(ModelShaderMesh *mesh);
     void initialize();
-    void paint(PbrShaderProgram *program);
+    void paint(ModelShaderProgram *program);
+    void paintWireframe();
     void cleanup();
     void showWireframe();
     void hideWireframe();
     bool isWireframeVisible();
-    void enableEnvironmentLight();
-    bool isEnvironmentLightEnabled();
     void reloadMesh();
     void fetchCurrentToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap);
     void updateToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap);
 private:
-    PbrShaderMesh *m_mesh = nullptr;
-    PbrShaderMesh *m_newMesh = nullptr;
+    ModelShaderMesh *m_mesh = nullptr;
+    ModelShaderMesh *m_newMesh = nullptr;
     int m_renderTriangleVertexCount = 0;
-    int m_renderEdgeVertexCount = 0;
     int m_renderToolVertexCount = 0;
     bool m_newMeshComing = false;
     bool m_showWireframe = false;
@@ -63,9 +63,6 @@ private:
     bool m_hasAmbientOcclusionMap = false;
     QOpenGLTexture *m_metalnessRoughnessAmbientOcclusionMap = nullptr;
     bool m_toolEnabled = false;
-    bool m_environmentLightEnabled = false;
-    QOpenGLTexture *m_environmentIrradianceMap = nullptr;
-    QOpenGLTexture *m_environmentSpecularMap = nullptr;
     QOpenGLTexture *m_toonNormalMap = nullptr;
     QOpenGLTexture *m_toonDepthMap = nullptr;
     QImage *m_newToonNormalMap = nullptr;
@@ -76,8 +73,7 @@ private:
 private:
     QOpenGLVertexArrayObject m_vaoTriangle;
     QOpenGLBuffer m_vboTriangle;
-    QOpenGLVertexArrayObject m_vaoEdge;
-    QOpenGLBuffer m_vboEdge;
+    MonochromeOpenGLObject m_wireframeObject;
     QOpenGLVertexArrayObject m_vaoTool;
     QOpenGLBuffer m_vboTool;
     QMutex m_meshMutex;

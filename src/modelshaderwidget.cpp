@@ -26,18 +26,30 @@
 #include <cmath>
 #include <QVector4D>
 #include <QSurfaceFormat>
-#include "pbrshaderwidget.h"
+#include "modelshaderwidget.h"
 
-bool PbrShaderWidget::m_transparent = true;
-float PbrShaderWidget::m_minZoomRatio = 5.0;
-float PbrShaderWidget::m_maxZoomRatio = 80.0;
+// QMouseEvent::globalPos() was removed in Qt 6 in favor of
+// globalPosition().toPoint(). This helper keeps the code building on both
+// Qt 5 and Qt 6.
+static inline QPoint mouseEventGlobalPos(QMouseEvent *event)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    return event->globalPosition().toPoint();
+#else
+    return event->globalPos();
+#endif
+}
 
-int PbrShaderWidget::m_defaultXRotation = 30 * 16;
-int PbrShaderWidget::m_defaultYRotation = -45 * 16;
-int PbrShaderWidget::m_defaultZRotation = 0;
-QVector3D PbrShaderWidget::m_defaultEyePosition = QVector3D(0, 0, -4.0);
+bool ModelShaderWidget::m_transparent = true;
+float ModelShaderWidget::m_minZoomRatio = 5.0;
+float ModelShaderWidget::m_maxZoomRatio = 80.0;
 
-PbrShaderWidget::PbrShaderWidget(QWidget *parent) :
+int ModelShaderWidget::m_defaultXRotation = 30 * 16;
+int ModelShaderWidget::m_defaultYRotation = -45 * 16;
+int ModelShaderWidget::m_defaultZRotation = 0;
+QVector3D ModelShaderWidget::m_defaultEyePosition = QVector3D(0, 0, -4.0);
+
+ModelShaderWidget::ModelShaderWidget(QWidget *parent) :
     QOpenGLWidget(parent)
 {
     if (m_transparent) {
@@ -60,50 +72,50 @@ PbrShaderWidget::PbrShaderWidget(QWidget *parent) :
     zoom(200);
 }
 
-const QVector3D &PbrShaderWidget::eyePosition()
+const QVector3D &ModelShaderWidget::eyePosition()
 {
 	return m_eyePosition;
 }
 
-const QVector3D &PbrShaderWidget::moveToPosition()
+const QVector3D &ModelShaderWidget::moveToPosition()
 {
     return m_moveToPosition;
 }
 
-void PbrShaderWidget::setEyePosition(const QVector3D &eyePosition)
+void ModelShaderWidget::setEyePosition(const QVector3D &eyePosition)
 {
     m_eyePosition = eyePosition;
     emit eyePositionChanged(m_eyePosition);
     update();
 }
 
-void PbrShaderWidget::reRender()
+void ModelShaderWidget::reRender()
 {
     emit renderParametersChanged();
     update();
 }
 
-int PbrShaderWidget::xRotation()
+int ModelShaderWidget::xRotation()
 {
     return m_xRotation;
 }
 
-int PbrShaderWidget::yRotation()
+int ModelShaderWidget::yRotation()
 {
     return m_yRotation;
 }
 
-int PbrShaderWidget::zRotation()
+int ModelShaderWidget::zRotation()
 {
     return m_zRotation;
 }
 
-PbrShaderWidget::~PbrShaderWidget()
+ModelShaderWidget::~ModelShaderWidget()
 {
     cleanup();
 }
 
-void PbrShaderWidget::normalizeAngle(int &angle)
+void ModelShaderWidget::normalizeAngle(int &angle)
 {
     while (angle < 0)
         angle += 360 * 16;
@@ -111,7 +123,7 @@ void PbrShaderWidget::normalizeAngle(int &angle)
         angle -= 360 * 16;
 }
 
-void PbrShaderWidget::setXRotation(int angle)
+void ModelShaderWidget::setXRotation(int angle)
 {
     normalizeAngle(angle);
     if (angle != m_xRotation) {
@@ -122,7 +134,7 @@ void PbrShaderWidget::setXRotation(int angle)
     }
 }
 
-void PbrShaderWidget::setYRotation(int angle)
+void ModelShaderWidget::setYRotation(int angle)
 {
     normalizeAngle(angle);
     if (angle != m_yRotation) {
@@ -133,7 +145,7 @@ void PbrShaderWidget::setYRotation(int angle)
     }
 }
 
-void PbrShaderWidget::setZRotation(int angle)
+void ModelShaderWidget::setZRotation(int angle)
 {
     normalizeAngle(angle);
     if (angle != m_zRotation) {
@@ -144,7 +156,7 @@ void PbrShaderWidget::setZRotation(int angle)
     }
 }
 
-void PbrShaderWidget::cleanup()
+void ModelShaderWidget::cleanup()
 {
     if (m_program == nullptr)
         return;
@@ -152,12 +164,16 @@ void PbrShaderWidget::cleanup()
     m_meshBinder.cleanup();
     delete m_program;
     m_program = nullptr;
+    if (m_monochromeProgram) {
+        delete m_monochromeProgram;
+        m_monochromeProgram = nullptr;
+    }
     doneCurrent();
 }
 
-void PbrShaderWidget::initializeGL()
+void ModelShaderWidget::initializeGL()
 {
-    connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, &PbrShaderWidget::cleanup);
+    connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, &ModelShaderWidget::cleanup);
 
     initializeOpenGLFunctions();
 	glEnable(GL_BLEND);
@@ -171,7 +187,7 @@ void PbrShaderWidget::initializeGL()
     if (m_transparent) {
         glClearColor(0, 0, 0, 0);
     } else {
-        QColor bgcolor = QWidget::palette().color(QWidget::backgroundRole());
+        QColor bgcolor(0x3D, 0x3D, 0x3D);
         glClearColor(bgcolor.redF(), bgcolor.greenF(), bgcolor.blueF(), 1);
     }
     
@@ -184,24 +200,27 @@ void PbrShaderWidget::initializeGL()
     }
     qDebug() << "isCoreProfile:" << isCoreProfile << "versionString:" << versionString;
         
-    m_program = new PbrShaderProgram(isCoreProfile);
+    m_program = new ModelShaderProgram(isCoreProfile);
+    m_monochromeProgram = new MonochromeOpenGLProgram();
+    m_monochromeProgram->load(isCoreProfile);
 
     m_meshBinder.initialize();
 
     m_program->release();
+    m_monochromeProgram->release();
 }
 
-void PbrShaderWidget::disableCullFace()
+void ModelShaderWidget::disableCullFace()
 {
     m_enableCullFace = false;
 }
 
-void PbrShaderWidget::setMoveToPosition(const QVector3D &moveToPosition)
+void ModelShaderWidget::setMoveToPosition(const QVector3D &moveToPosition)
 {
     m_moveToPosition = moveToPosition;
 }
 
-void PbrShaderWidget::paintGL()
+void ModelShaderWidget::paintGL()
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glViewport(0, 0, m_widthInPixels, m_heightInPixels);
@@ -215,7 +234,7 @@ void PbrShaderWidget::paintGL()
     m_camera.translate(m_eyePosition.x(), m_eyePosition.y(), m_eyePosition.z());
 
     m_program->bind();
-    m_program->setEyePosValue(m_eyePosition);
+    m_program->setEyePositionValue(m_eyePosition);
     m_program->setProjectionMatrixValue(m_projection);
     m_program->setModelMatrixValue(m_world);
     QMatrix3x3 normalMatrix = m_world.normalMatrix();
@@ -223,7 +242,7 @@ void PbrShaderWidget::paintGL()
     m_program->setViewMatrixValue(m_camera);
     m_program->setTextureEnabledValue(0);
     m_program->setNormalMapEnabledValue(0);
-    
+
     if (m_mousePickingEnabled && !m_mousePickTargetPositionInModelSpace.isNull()) {
         m_program->setMousePickEnabledValue(1);
         m_program->setMousePickTargetPositionValue(m_world * m_mousePickTargetPositionInModelSpace);
@@ -232,20 +251,36 @@ void PbrShaderWidget::paintGL()
         m_program->setMousePickTargetPositionValue(QVector3D());
     }
     m_program->setMousePickRadiusValue(m_mousePickRadius);
-    
+
     m_meshBinder.paint(m_program);
 
     m_program->release();
+
+    // Draw wireframe overlay using dedicated monochrome shader
+    if (m_meshBinder.isWireframeVisible()) {
+        m_monochromeProgram->bind();
+        m_monochromeProgram->setUniformValue(
+            m_monochromeProgram->getUniformLocationByName("projectionMatrix"), m_projection);
+        m_monochromeProgram->setUniformValue(
+            m_monochromeProgram->getUniformLocationByName("modelMatrix"), m_world);
+        m_monochromeProgram->setUniformValue(
+            m_monochromeProgram->getUniformLocationByName("viewMatrix"), m_camera);
+        if (m_monochromeProgram->isCoreProfile()) {
+            m_monochromeProgram->setUniformValue("viewportSize",
+                QVector2D(m_widthInPixels, m_heightInPixels));
+        }
+        m_meshBinder.paintWireframe();
+    }
 }
 
-void PbrShaderWidget::updateProjectionMatrix()
+void ModelShaderWidget::updateProjectionMatrix()
 {
     m_projection.setToIdentity();
     m_projection.translate(m_moveToPosition.x(), m_moveToPosition.y(), m_moveToPosition.z());
     m_projection.perspective(45.0f, GLfloat(width()) / height(), 0.01f, 100.0f);
 }
 
-void PbrShaderWidget::resizeGL(int w, int h)
+void ModelShaderWidget::resizeGL(int w, int h)
 {
 	m_widthInPixels = w * window()->devicePixelRatio();
 	m_heightInPixels = h * window()->devicePixelRatio();
@@ -253,7 +288,7 @@ void PbrShaderWidget::resizeGL(int w, int h)
     emit renderParametersChanged();
 }
 
-std::pair<QVector3D, QVector3D> PbrShaderWidget::mousePositionToMouseRay(const QPoint &mousePosition)
+std::pair<QVector3D, QVector3D> ModelShaderWidget::mousePositionToMouseRay(const QPoint &mousePosition)
 {
     auto modelView = m_camera * m_world;
     float x = qMax(qMin(mousePosition.x(), width() - 1), 0);
@@ -266,7 +301,7 @@ std::pair<QVector3D, QVector3D> PbrShaderWidget::mousePositionToMouseRay(const Q
     return std::make_pair(nearPosition, farPosition);
 }
 
-void PbrShaderWidget::toggleWireframe()
+void ModelShaderWidget::toggleWireframe()
 {
     if (m_meshBinder.isWireframeVisible())
         m_meshBinder.hideWireframe();
@@ -275,23 +310,12 @@ void PbrShaderWidget::toggleWireframe()
     update();
 }
 
-bool PbrShaderWidget::isWireframeVisible()
+bool ModelShaderWidget::isWireframeVisible()
 {
     return m_meshBinder.isWireframeVisible();
 }
 
-void PbrShaderWidget::enableEnvironmentLight()
-{
-    m_meshBinder.enableEnvironmentLight();
-    update();
-}
-
-bool PbrShaderWidget::isEnvironmentLightEnabled()
-{
-    return m_meshBinder.isEnvironmentLightEnabled();
-}
-
-void PbrShaderWidget::toggleRotation()
+void ModelShaderWidget::toggleRotation()
 {
     if (nullptr != m_rotationTimer) {
         delete m_rotationTimer;
@@ -307,7 +331,7 @@ void PbrShaderWidget::toggleRotation()
     }
 }
 
-bool PbrShaderWidget::inputMousePressEventFromOtherWidget(QMouseEvent *event)
+bool ModelShaderWidget::inputMousePressEventFromOtherWidget(QMouseEvent *event)
 {
     bool shouldStartMove = false;
     if (event->button() == Qt::LeftButton) {
@@ -316,8 +340,8 @@ bool PbrShaderWidget::inputMousePressEventFromOtherWidget(QMouseEvent *event)
             shouldStartMove = m_moveEnabled;
         }
         if (!shouldStartMove/* && !m_mousePickTargetPositionInModelSpace.isNull()*/)
-            emit mousePressed(event->globalPos());
-    } else if (event->button() == Qt::MidButton) {
+            emit mousePressed(mouseEventGlobalPos(event));
+    } else if (event->button() == Qt::MiddleButton) {
         shouldStartMove = m_moveEnabled;
     }
     if (shouldStartMove) {
@@ -332,7 +356,7 @@ bool PbrShaderWidget::inputMousePressEventFromOtherWidget(QMouseEvent *event)
     return false;
 }
 
-bool PbrShaderWidget::inputMouseReleaseEventFromOtherWidget(QMouseEvent *event)
+bool ModelShaderWidget::inputMouseReleaseEventFromOtherWidget(QMouseEvent *event)
 {
     Q_UNUSED(event);
     if (m_moveStarted) {
@@ -341,17 +365,17 @@ bool PbrShaderWidget::inputMouseReleaseEventFromOtherWidget(QMouseEvent *event)
     }
     if (event->button() == Qt::LeftButton) {
         if (m_mousePickingEnabled)
-            emit mouseReleased(event->globalPos());
+            emit mouseReleased(mouseEventGlobalPos(event));
     }
     return false;
 }
 
-void PbrShaderWidget::canvasResized()
+void ModelShaderWidget::canvasResized()
 {
     resize(parentWidget()->size());
 }
 
-bool PbrShaderWidget::inputMouseMoveEventFromOtherWidget(QMouseEvent *event)
+bool ModelShaderWidget::inputMouseMoveEventFromOtherWidget(QMouseEvent *event)
 {
     QPoint pos = convertInputPosFromOtherWidget(event);
     
@@ -367,7 +391,7 @@ bool PbrShaderWidget::inputMouseMoveEventFromOtherWidget(QMouseEvent *event)
     int dx = pos.x() - m_lastPos.x();
     int dy = pos.y() - m_lastPos.y();
 
-    if ((event->buttons() & Qt::MidButton) ||
+    if ((event->buttons() & Qt::MiddleButton) ||
             (m_moveStarted && (event->buttons() & Qt::LeftButton))) {
         if (QGuiApplication::queryKeyboardModifiers().testFlag(Qt::ShiftModifier)) {
             if (m_moveStarted) {
@@ -403,21 +427,21 @@ bool PbrShaderWidget::inputMouseMoveEventFromOtherWidget(QMouseEvent *event)
     return true;
 }
 
-QPoint PbrShaderWidget::convertInputPosFromOtherWidget(QMouseEvent *event)
+QPoint ModelShaderWidget::convertInputPosFromOtherWidget(QMouseEvent *event)
 {
-    return mapFromGlobal(event->globalPos());
+    return mapFromGlobal(mouseEventGlobalPos(event));
 }
 
-bool PbrShaderWidget::inputWheelEventFromOtherWidget(QWheelEvent *event)
+bool ModelShaderWidget::inputWheelEventFromOtherWidget(QWheelEvent *event)
 {
     if (m_moveStarted)
         return true;
     
     if (m_mousePickingEnabled) {
         if (QGuiApplication::queryKeyboardModifiers().testFlag(Qt::ShiftModifier)) {
-			if (event->delta() > 0)
+			if (event->angleDelta().y() > 0)
 				emit addMouseRadius(0.001f);
-			else if (event->delta() < 0)
+			else if (event->angleDelta().y() < 0)
 				emit addMouseRadius(-0.001f);
             return true;
         }
@@ -427,14 +451,14 @@ bool PbrShaderWidget::inputWheelEventFromOtherWidget(QWheelEvent *event)
         return false;
 
     qreal delta = geometry().height() * 0.1f;
-    if (event->delta() < 0)
+    if (event->angleDelta().y() < 0)
         delta = -delta;
     zoom(delta);
     
     return true;
 }
 
-void PbrShaderWidget::zoom(float delta)
+void ModelShaderWidget::zoom(float delta)
 {
     if (m_moveAndZoomByWindow) {
         QMargins margins(delta, delta, delta, delta);
@@ -466,82 +490,82 @@ void PbrShaderWidget::zoom(float delta)
     }
 }
 
-void PbrShaderWidget::setMousePickTargetPositionInModelSpace(QVector3D position)
+void ModelShaderWidget::setMousePickTargetPositionInModelSpace(QVector3D position)
 {
     m_mousePickTargetPositionInModelSpace = position;
     update();
 }
 
-void PbrShaderWidget::setMousePickRadius(float radius)
+void ModelShaderWidget::setMousePickRadius(float radius)
 {
     m_mousePickRadius = radius;
     update();
 }
 
-void PbrShaderWidget::updateMesh(PbrShaderMesh *mesh)
+void ModelShaderWidget::updateMesh(ModelShaderMesh *mesh)
 {
     m_meshBinder.updateMesh(mesh);
     emit renderParametersChanged();
     update();
 }
 
-void PbrShaderWidget::fetchCurrentToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
+void ModelShaderWidget::fetchCurrentToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
 {
     m_meshBinder.fetchCurrentToonNormalAndDepthMaps(normalMap, depthMap);
 }
 
-void PbrShaderWidget::updateToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
+void ModelShaderWidget::updateToonNormalAndDepthMaps(QImage *normalMap, QImage *depthMap)
 {
     m_meshBinder.updateToonNormalAndDepthMaps(normalMap, depthMap);
     update();
 }
 
-int PbrShaderWidget::widthInPixels()
+int ModelShaderWidget::widthInPixels()
 {
 	return m_widthInPixels;
 }
 
-int PbrShaderWidget::heightInPixels()
+int ModelShaderWidget::heightInPixels()
 {
 	return m_heightInPixels;
 }
 
-void PbrShaderWidget::enableMove(bool enabled)
+void ModelShaderWidget::enableMove(bool enabled)
 {
     m_moveEnabled = enabled;
 }
 
-void PbrShaderWidget::enableZoom(bool enabled)
+void ModelShaderWidget::enableZoom(bool enabled)
 {
     m_zoomEnabled = enabled;
 }
 
-void PbrShaderWidget::enableMousePicking(bool enabled)
+void ModelShaderWidget::enableMousePicking(bool enabled)
 {
     m_mousePickingEnabled = enabled;
 }
 
-void PbrShaderWidget::setMoveAndZoomByWindow(bool byWindow)
+void ModelShaderWidget::setMoveAndZoomByWindow(bool byWindow)
 {
     m_moveAndZoomByWindow = byWindow;
 }
 
-void PbrShaderWidget::mousePressEvent(QMouseEvent *event)
+void ModelShaderWidget::mousePressEvent(QMouseEvent *event)
 {
     inputMousePressEventFromOtherWidget(event);
 }
 
-void PbrShaderWidget::mouseMoveEvent(QMouseEvent *event)
+void ModelShaderWidget::mouseMoveEvent(QMouseEvent *event)
 {
     inputMouseMoveEventFromOtherWidget(event);
 }
 
-void PbrShaderWidget::wheelEvent(QWheelEvent *event)
+void ModelShaderWidget::wheelEvent(QWheelEvent *event)
 {
     inputWheelEventFromOtherWidget(event);
 }
 
-void PbrShaderWidget::mouseReleaseEvent(QMouseEvent *event)
+void ModelShaderWidget::mouseReleaseEvent(QMouseEvent *event)
 {
     inputMouseReleaseEventFromOtherWidget(event);
 }

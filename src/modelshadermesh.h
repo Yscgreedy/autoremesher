@@ -19,32 +19,32 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
-#ifndef AUTO_REMESHER_PBR_SHADER_MESH_H
-#define AUTO_REMESHER_PBR_SHADER_MESH_H
+#ifndef AUTO_REMESHER_MODEL_SHADER_MESH_H
+#define AUTO_REMESHER_MODEL_SHADER_MESH_H
 #include <QObject>
 #include <vector>
 #include <AutoRemesher/Vector3>
 #include <QColor>
 #include <QImage>
 #include <QTextStream>
-#include "pbrshadervertex.h"
+#include "modelshadervertex.h"
 
-class PbrShaderMesh
+class ModelShaderMesh
 {
 public:
-    PbrShaderMesh(const std::vector<AutoRemesher::Vector3> &vertices, const std::vector<std::vector<size_t>> &triangles,
+    ModelShaderMesh(const std::vector<AutoRemesher::Vector3> &vertices, const std::vector<std::vector<size_t>> &triangles,
         const std::vector<std::vector<AutoRemesher::Vector3>> &triangleVertexNormals,
         const QColor &color=Qt::white);
-    PbrShaderMesh(PbrShaderVertex *triangleVertices, int vertexNum, PbrShaderVertex *edgeVertices=nullptr, int edgeVertexCount=0,
+    ModelShaderMesh(ModelShaderVertex *triangleVertices, int vertexNum, ModelShaderVertex *edgeVertices=nullptr, int edgeVertexCount=0,
         std::vector<AutoRemesher::Vector3> *vertices=nullptr, std::vector<std::vector<size_t>> *faces=nullptr);
-    PbrShaderMesh(const PbrShaderMesh &mesh);
-    PbrShaderMesh();
-    ~PbrShaderMesh();
-    PbrShaderVertex *triangleVertices();
+    ModelShaderMesh(const ModelShaderMesh &mesh);
+    ModelShaderMesh();
+    ~ModelShaderMesh();
+    ModelShaderVertex *triangleVertices();
     int triangleVertexCount();
-    PbrShaderVertex *edgeVertices();
+    ModelShaderVertex *edgeVertices();
     int edgeVertexCount();
-    PbrShaderVertex *toolVertices();
+    ModelShaderVertex *toolVertices();
     int toolVertexCount();
     const std::vector<AutoRemesher::Vector3> &vertices();
     const std::vector<std::vector<size_t>> &faces();
@@ -62,18 +62,18 @@ public:
     void setHasAmbientOcclusionInImage(bool hasInImage);
     static float m_defaultMetalness;
     static float m_defaultRoughness;
-    void updateTool(PbrShaderVertex *toolVertices, int vertexNum);
-    void updateEdges(PbrShaderVertex *edgeVertices, int edgeVertexCount);
-    void updateTriangleVertices(PbrShaderVertex *triangleVertices, int triangleVertexCount);
+    void updateTool(ModelShaderVertex *toolVertices, int vertexNum);
+    void updateEdges(ModelShaderVertex *edgeVertices, int edgeVertexCount);
+    void updateTriangleVertices(ModelShaderVertex *triangleVertices, int triangleVertexCount);
     quint64 meshId() const;
     void setMeshId(quint64 id);
     void removeColor();
 private:
-    PbrShaderVertex *m_triangleVertices = nullptr;
+    ModelShaderVertex *m_triangleVertices = nullptr;
     int m_triangleVertexCount = 0;
-    PbrShaderVertex *m_edgeVertices = nullptr;
+    ModelShaderVertex *m_edgeVertices = nullptr;
     int m_edgeVertexCount = 0;
-    PbrShaderVertex *m_toolVertices = nullptr;
+    ModelShaderVertex *m_toolVertices = nullptr;
     int m_toolVertexCount = 0;
     std::vector<AutoRemesher::Vector3> m_vertices;
     std::vector<std::vector<size_t>> m_faces;

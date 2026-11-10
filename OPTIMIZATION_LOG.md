@@ -10,9 +10,9 @@
 
 | 模型 | 参数 | 原始 (s) | 改造后 (s) | 加速 |
 |---|---|---|---|---|
-| body_vox.obj（78k 三角，1 岛） | 15k quads, adaptivity 0.3 | 8.276 | **3.61** | **2.29×** |
-| head_in.obj（400k 三角，**8979 岛**） | 10k quads, adaptivity 0.5 | 12.739 | **4.57** | **2.79×** |
-| head_clean.obj（400k 三角，1 岛） | 20k quads, adaptivity 0.3 | 41.182 | **9.20** | **4.48×** |
+| body_vox.obj（78k 三角，1 岛） | 15k quads, adaptivity 0.3 | 8.276 | **3.54** | **2.34×** |
+| head_in.obj（400k 三角，**8979 岛**） | 10k quads, adaptivity 0.5 | 12.739 | **4.54** | **2.81×** |
+| head_clean.obj（400k 三角，1 岛） | 20k quads, adaptivity 0.3 | 41.182 | **8.75** | **4.71×** |
 
 （`--repeat 2` 取最好值；三次连续运行输出逐位一致：head_clean 恒为 13091 quads / 395 non-quads / 13571 顶点。）
 
@@ -146,3 +146,43 @@ build\pristine\b\arbench.exe --input ...（同上参数）
 ### 本轮之后的热点（body_vox / head_clean）
 
 `holdSingularLines`（145/350 ms）、`Simplifying singularities`（208/1083 ms）、cover 三件套（curl/round/eliminate ≈ 830/1800 ms）、`Projecting vertices`（434/768 ms）、`Solving frame field`（158/…）。
+
+
+---
+
+## 6. 第三轮：奇异点简化与包围盒查询
+
+第一、二轮之后 head_clean（单岛，9.2 s）的大头变成：`Simplifying singularities` 876 ms、`Rounding cover` 832 ms、`Correcting field curl` 818 ms、`Projecting vertices` 805 ms、`Eliminating cover constraints` 505 ms。这轮先打前两处结构性浪费。
+
+### 6.1 `cancelPair` 的每候选全网格数组
+
+`src/AutoRemesher/singularitysimplifier.{h,cpp}`
+
+每个候选点对原来要：分配并填满两个 `vector<size_t>(faceCount)` 的距离数组（400k 面 = 3.2 MB × 2）、再全表扫描求交、再分配 `inRegion`(F)、`affected`(V)、`jump`(3F)、`saved`，以及 `pathBetween` 的 `previous`(V)。候选数量在千级，等于把整张网格来回扫了几千遍。
+
+改法：**全部换成成员级复用 + 世代戳（generation stamp）**
+- `m_ballDistance` / `m_ballStampFirst` / `m_ballStampSecond`：BFS 只写访问到的面，成员判定 `stamp == generation` 是 O(1)，清空也是 O(1)；
+- 两球求交改为**遍历较小的那个球**，而不是遍历全部面；
+- `m_regionStamp` / `m_affectedStamp` / `m_jumpStamp` / `m_pathStamp` + `m_pathPrevious` 同理；
+- `vertexCharges()` 每次返回 `vector<int>`（V = 20 万时一次 800 KB 拷贝，每个候选调用 4 次）改为 `chargesCached()` 返回 `const&`；
+- `region` 在求交后**排序**，让 Gauss-Seidel 的遍历顺序与原来"升序扫描全表"一致——否则结果会随两球哪个更小而漂移（这点一开始就漂了 12 个四边形）。
+
+**效果**：body_vox 208 → **94 ms**，head_clean 876 → **491 ms**，输出与改造前逐位一致（13071/417/13583）。
+
+### 6.2 AABB 树加直接盒查询
+
+`thirdparty/isotropicremesher/axisalignedboundingboxtree.h`
+
+原来"查一个盒子"的做法是**临时造一棵单盒树**再调 `test()`——每个顶点、每次投影都分配节点。新增 `query(box, result)`，直接下降已有树、逐层比盒，零分配。用在两处：
+- `IsotropicRemesher::projectVertices`（每个顶点一次 → 每个顶点省一棵树的构造）；
+- `QuadExtractor::smoothAndProject`（每个投影点一次）。
+
+**效果**：`Projecting vertices` 805 → **774 ms**（这块真正的成本是 `closestPointOnTriangle` 的候选数，不是查询本身，下一步要改成最近三角形的最优优先下降）。
+
+### 6.3 一个自己造的并发 bug（记录）
+
+把 `smoothAndProject` 的候选缓冲提到 lambda 外，结果被 `tbb::parallel_for` 多线程共享 → 立刻访问越界。改成 `static thread_local`。教训：这个函数体虽然"读旧写新"，但**临时缓冲不是线程安全的**。
+
+### 本轮之后
+
+body_vox **3.54 s**（2.34×）、head_in **4.54 s**（2.81×）、head_clean **8.75 s**（4.71×）。剩余大头是盖层求解（round/curl/eliminate 合计 ≈ 2.1 s @ head_clean）与 `projectVertices` 的候选三角形数量，二者都需要动算法而不是减开销。

@@ -61,12 +61,26 @@ private:
     void buildChargeSums();
     void writeMismatch(size_t corner, int value);
     std::vector<int> vertexChargesUncached() const;
+    // Same values as vertexCharges(), without copying the whole field: the
+    // pair loop asks for it several times per candidate.
+    const std::vector<int>& chargesCached() const;
+    // cancelPair runs once per candidate pair, so every array it walks is kept
+    // and reused.  Membership is tracked with per-array generation stamps, which
+    // makes clearing O(1) instead of O(faces).
+    mutable std::vector<size_t> m_ballDistance;
+    mutable std::vector<int> m_ballStampFirst, m_ballStampSecond;
+    mutable std::vector<int> m_regionStamp, m_affectedStamp, m_jumpStamp, m_pathStamp;
+    mutable std::vector<int> m_jump;
+    mutable std::vector<size_t> m_pathPrevious;
+    mutable std::vector<int> m_chargeCache;
+    mutable int m_generation = 0;
     void buildFramesAndConnection();
     void updateMismatches(const std::vector<size_t>& faces);
     std::vector<size_t> facetsAroundVertex(size_t vertex) const;
     size_t cornerAlongEdge(size_t from, size_t to) const;
     std::vector<size_t> pathBetween(size_t first, size_t second,
-        const std::vector<char>& inRegion, const std::vector<size_t>& freeFaces) const;
+        const std::vector<int>& regionStamp, int regionGeneration,
+        const std::vector<size_t>& freeFaces) const;
     bool cancelPair(size_t first, size_t second, size_t hops);
 };
 

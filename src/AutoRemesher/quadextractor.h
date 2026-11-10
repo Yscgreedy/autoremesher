@@ -22,7 +22,10 @@
 #include <AutoRemesher/Progress>
 #include <AutoRemesher/Vector2>
 #include <AutoRemesher/Vector3>
+#include <axisalignedboundingbox.h>
+#include <axisalignedboundingboxtree.h>
 #include <cstdint>
+#include <memory>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -92,6 +95,21 @@ private:
         int integer = 0;
     };
 
+    // Connections are looked up once per candidate edge in the singularity line
+    // walk, so the ordered map was replaced by a hash map keyed on the same
+    // unordered vertex pair.
+    struct EdgePairHash {
+        size_t operator()(const std::pair<size_t, size_t>& edge) const
+        {
+            uint64_t hash = (uint64_t)edge.first * 0x9e3779b97f4a7c15ull
+                ^ ((uint64_t)edge.second + 0x165667b19e3779f9ull);
+            hash ^= hash >> 31;
+            hash *= 0xbf58476d1ce4e5b9ull;
+            hash ^= hash >> 27;
+            return (size_t)hash;
+        }
+    };
+
     const std::vector<Vector3>* m_vertices = nullptr;
     const std::vector<std::vector<size_t>>* m_triangles = nullptr;
     const std::vector<std::vector<Vector2>>* m_triangleUvs = nullptr;
@@ -102,9 +120,22 @@ private:
     const std::vector<std::vector<Vector2>>* m_originalTriangleUvs = nullptr;
     const std::vector<size_t>* m_singularVertices = nullptr;
     ProgressHandler m_progressHandler;
-    std::map<std::pair<size_t, size_t>, ConnectionInfo> m_connectionInfos;
+    std::unordered_map<std::pair<size_t, size_t>, ConnectionInfo, EdgePairHash> m_connectionInfos;
+    // Every cleanup pass ends by pulling its patch back onto the source mesh,
+    // and rebuilding the bounding volume tree over that mesh each time was the
+    // bulk of those passes.  The source mesh never changes, so one tree is kept.
+    std::vector<AxisAlignedBoudingBox> m_projectionBoxes;
+    std::vector<size_t> m_projectionIndices;
+    std::unique_ptr<AxisAlignedBoudingBoxTree> m_projectionTree;
+    AxisAlignedBoudingBoxTree* projectionTree();
+    // smoothAroundVertices() runs once per accepted cleanup operation; keeping the
+    // vertex to face lists alive lets each run refill them instead of allocating
+    // tens of thousands of small vectors.
+    std::vector<std::vector<size_t>> m_vertexFaceScratch;
     std::set<std::pair<size_t, size_t>> m_addedConnections;
-    std::set<std::pair<size_t, size_t>> m_halfEdges;
+    // Rebuilt by every cleanup pass and queried per candidate face, so the half
+    // edge set is hashed rather than ordered.
+    std::unordered_set<std::pair<size_t, size_t>, EdgePairHash> m_halfEdges;
 
     void extractConnections(std::vector<Vector3>* crossPoints,
         std::vector<size_t>* sourceTriangles,

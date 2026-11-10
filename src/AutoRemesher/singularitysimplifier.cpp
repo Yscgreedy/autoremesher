@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <iostream>
@@ -78,7 +79,80 @@ SingularitySimplifier::SingularitySimplifier(const SurfaceMesh& mesh,
 {
 }
 
+// The closed-fan test only depends on topology, so it is evaluated once per
+// vertex; the sum itself is mirrored in m_chargeSum and kept up to date by
+// writeMismatch().
+void SingularitySimplifier::buildChargeSums()
+{
+    const size_t vertexCount = m_mesh.vertexCount();
+    m_chargeSum.assign(vertexCount, 0);
+    m_chargeClosed.assign(vertexCount, 0);
+    for (size_t v = 0; v < vertexCount; ++v) {
+        const std::vector<size_t>& corners = m_mesh.cornersAroundVertex(v);
+        if (corners.empty())
+            continue;
+        size_t c = corners.front();
+        const size_t start = c;
+        bool closed = true;
+        size_t steps = 0;
+        do {
+            if (++steps > m_mesh.cornerCount()) {
+                closed = false;
+                break;
+            }
+            const size_t opposite = m_mesh.oppositeCorner(c);
+            if (SurfaceMesh::npos == opposite) {
+                closed = false;
+                break;
+            }
+            c = m_mesh.nextCorner(opposite);
+            if (m_mesh.cornerVertex(c) != v) {
+                closed = false;
+                break;
+            }
+        } while (c != start);
+        m_chargeClosed[v] = closed ? 1 : 0;
+    }
+}
+
+void SingularitySimplifier::writeMismatch(size_t corner, int value)
+{
+    const int previous = m_mismatch[corner];
+    if (previous == value)
+        return;
+    m_mismatch[corner] = value;
+    const size_t vertex = m_mesh.cornerVertex(corner);
+    if (vertex < m_chargeSum.size())
+        m_chargeSum[vertex] += value - previous;
+}
+
 std::vector<int> SingularitySimplifier::vertexCharges() const
+{
+    if (nullptr == m_field || m_field->size() != m_mesh.faceCount())
+        return std::vector<int>(m_mesh.vertexCount(), 0);
+    // Without cached mismatches there is nothing to sum, so fall back to the
+    // per-corner quarter turn evaluation.
+    if (m_mismatch.size() != m_mesh.cornerCount()
+        || m_chargeSum.size() != m_mesh.vertexCount())
+        return vertexChargesUncached();
+    std::vector<int> result(m_mesh.vertexCount(), 0);
+    for (size_t v = 0; v < result.size(); ++v) {
+        if (!m_chargeClosed[v])
+            continue;
+        result[v] = ((m_chargeSum[v] % 4) + 4) % 4;
+    }
+    static const bool verifyCharges = nullptr != getenv("AR_VERIFY_CHARGES");
+    if (verifyCharges) {
+        const std::vector<int> reference = vertexChargesUncached();
+        for (size_t v = 0; v < reference.size() && v < result.size(); ++v)
+            if (reference[v] != result[v])
+                fprintf(stderr, "charge mismatch at %zu: incremental %d reference %d\n",
+                    v, result[v], reference[v]);
+    }
+    return result;
+}
+
+std::vector<int> SingularitySimplifier::vertexChargesUncached() const
 {
     std::vector<int> result(m_mesh.vertexCount(), 0);
     if (nullptr == m_field || m_field->size() != m_mesh.faceCount())
@@ -154,6 +228,7 @@ void SingularitySimplifier::buildFramesAndConnection()
     m_connection.assign(corners, 0.0);
     m_mismatch.assign(corners, 0);
     m_sharpCorner.assign(corners, false);
+    buildChargeSums();
     for (size_t c = 0; c < corners; ++c) {
         const size_t other = m_mesh.oppositeCorner(c);
         if (other == SurfaceMesh::npos)
@@ -178,8 +253,8 @@ void SingularitySimplifier::updateMismatches(const std::vector<size_t>& faces)
                 continue;
             const size_t g = m_mesh.cornerFace(other);
             const int turns = static_cast<int>(std::lround((m_angles[g] - (m_angles[f] + m_connection[c])) / (M_PI / 2.0)));
-            m_mismatch[c] = ((turns % 4) + 4) % 4;
-            m_mismatch[other] = (4 - m_mismatch[c]) % 4;
+            writeMismatch(c, ((turns % 4) + 4) % 4);
+            writeMismatch(other, (4 - m_mismatch[c]) % 4);
         }
 }
 

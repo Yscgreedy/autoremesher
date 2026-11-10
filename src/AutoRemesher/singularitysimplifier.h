@@ -51,6 +51,16 @@ private:
     std::vector<int> m_mismatch;
     std::vector<bool> m_sharpCorner;
     std::vector<Vector3> m_frameU, m_frameV;
+    // A vertex charge is the sum of the 90 degree mismatches of the corners
+    // around it, modulo 4, or zero when that fan is not closed.  cancelPair
+    // asks for the whole charge field several times per candidate pair, and
+    // recomputing every vertex each time dominated the simplification, so the
+    // fan sum is kept per vertex and updated by the mismatch writes themselves.
+    mutable std::vector<int> m_chargeSum;
+    mutable std::vector<char> m_chargeClosed;
+    void buildChargeSums();
+    void writeMismatch(size_t corner, int value);
+    std::vector<int> vertexChargesUncached() const;
     void buildFramesAndConnection();
     void updateMismatches(const std::vector<size_t>& faces);
     std::vector<size_t> facetsAroundVertex(size_t vertex) const;

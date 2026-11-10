@@ -87,6 +87,32 @@ public:
         }
     }
     
+    // Collects the boxes of this tree that intersect the given box.  A single
+    // box query used to be done by building a second one-box tree and calling
+    // test(), which allocated a node per query; descending this tree and
+    // comparing boxes directly is exact and allocation free.
+    void query(const AxisAlignedBoudingBox &box, std::vector<size_t> *result) const
+    {
+        if (nullptr == m_root)
+            return;
+        queryNode(m_root, box, result);
+    }
+
+    void queryNode(const Node *node, const AxisAlignedBoudingBox &box,
+        std::vector<size_t> *result) const
+    {
+        if (!node->boundingBox.intersectWith(box))
+            return;
+        if (node->isLeaf()) {
+            for (const auto &index: node->boxIndices)
+                if ((*m_boxes)[index].intersectWith(box))
+                    result->push_back(index);
+            return;
+        }
+        queryNode(node->left, box, result);
+        queryNode(node->right, box, result);
+    }
+
     void test(const Node *first, const Node *second,
         const std::vector<AxisAlignedBoudingBox> *secondBoxes,
         std::vector<std::pair<size_t, size_t>> *pairs) const

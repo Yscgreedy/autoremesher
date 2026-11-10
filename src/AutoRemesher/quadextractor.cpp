@@ -1706,17 +1706,21 @@ void QuadExtractor::smoothAndProject(size_t iterations,
         return;
 
     auto projectToTargetMesh = [&](const Vector3& position, Vector3* projected) {
+        // The projection runs inside a parallel loop, so the scratch list has to
+        // belong to the calling thread.
+        static thread_local std::vector<size_t> candidates;
         for (double radius = averageEdgeLength; radius <= averageEdgeLength * 8.0; radius *= 2.0) {
-            std::vector<AxisAlignedBoudingBox> queryBoxes(1);
-            queryBoxes[0].update(::Vector3(position.x() - radius, position.y() - radius, position.z() - radius));
-            queryBoxes[0].update(::Vector3(position.x() + radius, position.y() + radius, position.z() + radius));
-            queryBoxes[0].updateCenter();
-            AxisAlignedBoudingBoxTree queryTree(&queryBoxes, { 0 }, queryBoxes[0]);
-            std::vector<std::pair<size_t, size_t>> pairs;
-            tree.test(tree.root(), queryTree.root(), &queryBoxes, &pairs);
+            // A single box query against the cached tree: building a one box tree
+            // per projected vertex cost more than the query itself.
+            AxisAlignedBoudingBox queryBox;
+            queryBox.update(::Vector3(position.x() - radius, position.y() - radius, position.z() - radius));
+            queryBox.update(::Vector3(position.x() + radius, position.y() + radius, position.z() + radius));
+            queryBox.updateCenter();
+            candidates.clear();
+            tree.query(queryBox, &candidates);
             double minDistance2 = std::numeric_limits<double>::max();
-            for (const auto& it : pairs) {
-                const auto& triangle = (*m_triangles)[it.first];
+            for (const size_t it : candidates) {
+                const auto& triangle = (*m_triangles)[it];
                 const auto candidate = closestPointOnTriangle(position,
                     (*m_vertices)[triangle[0]],
                     (*m_vertices)[triangle[1]],

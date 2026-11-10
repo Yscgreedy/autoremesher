@@ -523,23 +523,22 @@ void IsotropicRemesher::projectVertices()
             loopHalfedge = loopHalfedge->oppositeHalfedge->nextHalfedge;
         } while (loopHalfedge != startHalfedge);
 
-        AxisAlignedBoudingBoxTree testTree(&rayBox,
-            {0},
-            rayBox[0]);
-        std::vector<std::pair<size_t, size_t>> pairs;
-        m_axisAlignedBoundingBoxTree->test(m_axisAlignedBoundingBoxTree->root(), testTree.root(), &rayBox, &pairs);
+        // One box query, answered by descending the existing tree instead of
+        // building a throwaway tree for every vertex.
+        std::vector<size_t> candidates;
+        m_axisAlignedBoundingBoxTree->query(box, &candidates);
 
         std::vector<std::pair<Vector3, double>> hits;
 
         auto boundingBoxSize = box.upperBound() - box.lowerBound();
         Vector3 segment = vertex->_normal * (boundingBoxSize[0] + boundingBoxSize[1] + boundingBoxSize[2]);
-        for (const auto &it: pairs) {
+        for (const size_t it : candidates) {
             // The segment runs both ways along the normal and reaches well
             // past the one ring, so on thin parts it also hits the surface
             // facing the other way. Landing there tears the neighborhood open.
-            if (Vector3::dotProduct((*projNormals)[it.first], vertex->_normal) <= 0)
+            if (Vector3::dotProduct((*projNormals)[it], vertex->_normal) <= 0)
                 continue;
-            const auto &triangle = (*projTriangles)[it.first];
+            const auto &triangle = (*projTriangles)[it];
             std::vector<Vector3> trianglePositions = {
                 (*projVertices)[triangle[0]],
                 (*projVertices)[triangle[1]],
@@ -548,7 +547,7 @@ void IsotropicRemesher::projectVertices()
             Vector3 intersection;
             if (Vector3::intersectSegmentAndPlane(vertex->position - segment, vertex->position + segment,
                     trianglePositions[0],
-                    (*projNormals)[it.first],
+                    (*projNormals)[it],
                     &intersection)) {
                 std::vector<Vector3> normals;
                 for (size_t i = 0; i < 3; ++i) {

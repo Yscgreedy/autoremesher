@@ -22,6 +22,8 @@
 #ifndef AUTO_REMESHER_POSITION_KEY_H
 #define AUTO_REMESHER_POSITION_KEY_H
 #include <AutoRemesher/Vector3>
+#include <cstddef>
+#include <cstdint>
 
 namespace AutoRemesher {
 
@@ -32,6 +34,9 @@ public:
     const Vector3& position() const;
     bool operator<(const PositionKey& right) const;
     bool operator==(const PositionKey& right) const;
+    long intX() const { return m_intX; }
+    long intY() const { return m_intY; }
+    long intZ() const { return m_intZ; }
 
 private:
     long m_intX = 0;
@@ -40,6 +45,22 @@ private:
     Vector3 m_position;
 
     static long m_toIntFactor;
+};
+
+// The quantized integers are the whole identity of a key, so hashing them is
+// exact and lets the extractor use hash maps on its hottest lookup path.
+struct PositionKeyHash {
+    size_t operator()(const PositionKey& key) const
+    {
+        uint64_t hash = 1469598103934665603ull;
+        const long values[3] = { key.intX(), key.intY(), key.intZ() };
+        for (int i = 0; i < 3; ++i) {
+            hash ^= (uint64_t)(values[i] + 0x9e3779b97f4a7c15ull);
+            hash *= 1099511628211ull;
+            hash ^= hash >> 29;
+        }
+        return (size_t)hash;
+    }
 };
 
 }

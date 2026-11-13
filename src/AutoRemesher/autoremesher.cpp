@@ -599,6 +599,9 @@ bool AutoRemesher::remesh()
         double anisotropy;
         double sharpEdgeDegrees;
         double smoothNormalDegrees;
+        // Share of the requested quad budget, filled in once every island has
+        // been resampled; 0 means "keep the legacy scale".
+        size_t targetQuads = 0;
     };
 
     if (nullptr != m_progressHandler)
@@ -765,6 +768,27 @@ bool AutoRemesher::remesh()
         std::vector<std::pair<Vector3, Vector3>> capturedExtractedConnections;
     };
 
+    if (m_exactTargetQuads && m_targetTriangleCount > 0) {
+        const size_t totalTargetQuads = std::max<size_t>(1, m_targetTriangleCount / 2);
+        std::vector<double> islandAreas(islandContexes.size(), 0.0);
+        double totalArea = 0.0;
+        for (size_t i = 0; i < islandContexes.size(); ++i) {
+            islandAreas[i] = calculateMeshArea(islandContexes[i].vertices, islandContexes[i].triangles);
+            totalArea += islandAreas[i];
+        }
+        if (totalArea > 0.0) {
+            for (size_t i = 0; i < islandContexes.size(); ++i) {
+                const double share = islandAreas[i] / totalArea;
+                size_t target = (size_t)std::llround((double)totalTargetQuads * share);
+                // A visible island with a sub-quad share still deserves one
+                // quad; without the floor the smallest parts silently vanish.
+                if (0 == target && islandAreas[i] > 0.0)
+                    target = 1;
+                islandContexes[i].targetQuads = target;
+            }
+        }
+    }
+
     std::vector<ParameterizationThread> parameterizationThreads(islandContexes.size());
     for (size_t i = 0; i < islandContexes.size(); ++i) {
         auto& thread = parameterizationThreads[i];
@@ -814,6 +838,7 @@ bool AutoRemesher::remesh()
                 thread.parameterizer->setGradientAdaptivity(thread.island->adaptivity);
                 thread.parameterizer->setAnisotropy(thread.island->anisotropy);
                 thread.parameterizer->setSharpEdgeDegrees(thread.island->sharpEdgeDegrees);
+                thread.parameterizer->setTargetQuadCount(thread.island->targetQuads);
                 bool parameterizeSucceeded = true;
                 try {
                     parameterizeSucceeded = thread.parameterizer->parameterize();
@@ -849,6 +874,25 @@ bool AutoRemesher::remesh()
                         uvs.get());
                     thread.remesher->setOriginalTriangleUvs(&thread.capturedOriginalUvs);
                     thread.remesher->setSingularVertices(&thread.capturedSingularVertexIndices);
+                    if (thread.autoRemesher->m_islandAreaFraction > 0.0)
+                        thread.remesher->setIslandAreaFraction(thread.autoRemesher->m_islandAreaFraction);
+                    if (thread.autoRemesher->m_weldPatches)
+                        thread.remesher->setWeldPatches(true);
+                    if (thread.autoRemesher->m_gradedHoleFilling)
+                        thread.remesher->setGradedHoleFilling(true);
+                    if (thread.autoRemesher->m_projectedHoleCaps)
+                        thread.remesher->setProjectedHoleCaps(true);
+                    if (thread.autoRemesher->m_localRemesh)
+                        thread.remesher->setLocalRemesh(true);
+                    if (thread.autoRemesher->m_relativePositionTolerance) {
+                        // One thousandth of the island's target edge length: fine
+                        // enough to keep distinct cross points apart, coarse enough
+                        // to absorb the last-bit differences between the two
+                        // triangles that computed the same intersection.
+                        const double tolerance = thread.island->voxelSize * 1e-3;
+                        if (tolerance > 0.0)
+                            thread.remesher->setPositionTolerance(tolerance);
+                    }
                     thread.remesher->setProgressHandler(
                         thread.autoRemesher->makeStageProgress(thread.islandIndex,
                             islandParameterizeEnd, 1.0f, 1.0f));

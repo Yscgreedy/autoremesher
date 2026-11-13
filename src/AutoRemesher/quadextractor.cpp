@@ -24,6 +24,9 @@
 #include <algorithm>
 #include <axisalignedboundingbox.h>
 #include <axisalignedboundingboxtree.h>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -107,6 +110,11 @@ bool QuadExtractor::extract()
         if (m_progressHandler)
             m_progressHandler(fraction, name);
     };
+
+    // The weld step is scale sensitive; honour the caller's step before any
+    // cross point is created.  Zero restores the historical fixed 1e-5 even when
+    // a previous extraction on this thread set a relative step.
+    PositionKey::setTolerance(m_positionTolerance > 0.0 ? m_positionTolerance : 1e-5);
 
     report(0.0f, "Extracting connections");
     std::cerr << "Extract connections..." << std::endl;
@@ -247,6 +255,8 @@ bool QuadExtractor::extract()
     bool changed = false;
     if (removeIsolatedFaces())
         changed = true;
+    if (m_islandAreaFraction > 0.0 || m_weldPatches)
+        weldKeptPatches();
     while (removeNonManifoldFaces()) {
         changed = true;
         removeIsolatedFaces();
@@ -319,6 +329,17 @@ bool QuadExtractor::extract()
     splitHighValenceTriangleFans();
     report(0.99f, "Collapsing three valence edge pairs");
     collapseThreeValenceEdgePairs();
+    if (m_localRemesh) {
+        report(0.995f, "Optimising local topology");
+        // A sweep over every face is cheap; the budget only has to stop a
+        // pathological mesh from turning re-pairing into a global churn
+        const size_t applied = optimizeLocalTopology(4000);
+        const size_t patches = requadrangulateNonQuadPatches(2000);
+        if (applied > 0 || patches > 0)
+            std::cerr << "Local topology optimisation applied " << applied << " operation(s), "
+                      << patches << " patch(es)" << std::endl;
+        rebuildHalfEdges();
+    }
     report(1.0f, "");
 
 #if AUTO_REMESHER_DEV
@@ -566,13 +587,20 @@ void QuadExtractor::extractMesh(std::vector<Vector3>& points,
         return normals.normalized();
     };
 
+    // The 75 degree veto is what turns a failed four ring into a five ring, and a
+    // five ring is a pentagon in the output.  AR_SIDE_DOT lets the threshold be
+    // A/B tested without a rebuild of the hypothesis.
+    static const double sideDotThreshold = []() {
+        const char* value = getenv("AR_SIDE_DOT");
+        return nullptr != value ? atof(value) : 0.259;
+    }();
     auto calculateSide = [&](const std::vector<size_t>& corners) {
         auto ringNormal = calculateFaceNormal(corners);
         Vector3 originalNormal;
         for (const auto& it : corners)
             originalNormal += triangleNormals[it];
         auto dot = Vector3::dotProduct(ringNormal, originalNormal.normalized());
-        const double dotThreshold = 0.259; // > 75 or < 105 degrees
+        const double dotThreshold = sideDotThreshold; // 0.259 means > 75 or < 105 degrees
         if (dot > dotThreshold)
             return (int)1;
         else if (dot < -dotThreshold)
@@ -1379,7 +1407,18 @@ void QuadExtractor::fixHoles()
     std::set<std::pair<size_t, size_t>> orderedHalfEdges(m_halfEdges.begin(), m_halfEdges.end());
     std::vector<std::vector<size_t>> loops;
     searchBoundaries(orderedHalfEdges, &loops);
+    size_t gradedFaces = 0;
     for (auto& loop : loops) {
+        if (m_gradedHoleFilling && loop.size() > 8
+            && (loop.size() <= 65 || m_projectedHoleCaps)) {
+            // The greedy quad pass gives up as soon as its best corner score is
+            // non-positive, which is exactly what the large holes hit.  Seal them
+            // by ear clipping instead; the triangle cleanup passes that run
+            // afterwards pair the triangles into quads where they can.
+            std::cerr << "Fixing hole (graded) at length:" << loop.size() << "..." << std::endl;
+            gradedFaces += fillHoleGraded(loop);
+            continue;
+        }
         if (loop.size() > 65) {
             std::cerr << "Ignore long hole at length:" << loop.size() << std::endl;
             continue;
@@ -1389,6 +1428,1318 @@ void QuadExtractor::fixHoles()
         if (loop.size() >= 4)
             fixHoleWithQuads(loop, false);
     }
+    if (m_gradedHoleFilling && gradedFaces > 0) {
+        std::cerr << "Graded hole filling added " << gradedFaces << " face(s)" << std::endl;
+        rebuildHalfEdges();
+    }
+}
+
+size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
+{
+    if (hole.size() < 3)
+        return 0;
+    // The boundary walk lists the loop opposite to the face winding, so emit the
+    // polygon reversed; that is the same convention the greedy pass uses.
+    std::vector<size_t> polygon(hole.rbegin(), hole.rend());
+    const size_t count = polygon.size();
+
+    // Two cap strategies, both manifold by construction and both avoiding the
+    // self-overlap ear clipping suffers on a non-planar loop:
+    //  - medium loops: one centroid vertex, fan triangles paired into quads;
+    //  - large loops (when projected caps are enabled): an extra projected ring
+    //    halfway to the centroid, so the cap can follow a curved hole instead of
+    //    cutting straight across it.
+    std::vector<std::vector<size_t>> newFaces;
+    const auto addFace = [&](std::vector<size_t> face) {
+        std::vector<size_t> sorted(face);
+        std::sort(sorted.begin(), sorted.end());
+        if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+            return;
+        newFaces.push_back(std::move(face));
+    };
+    Vector3 center(0, 0, 0);
+    for (const size_t vertex : polygon)
+        center += m_remeshedVertices[vertex];
+    center = center / (double)count;
+
+    double perimeter = 0.0;
+    for (size_t i = 0; i < count; ++i)
+        perimeter += (m_remeshedVertices[polygon[i]] - m_remeshedVertices[polygon[(i + 1) % count]]).length();
+    const double averageEdge = perimeter / (double)count;
+
+    const bool useProjectedRing = m_projectedHoleCaps && count > 65;
+    const size_t firstNewVertex = m_remeshedVertices.size();
+    if (useProjectedRing) {
+        // Snap the apex and the mid ring onto the source surface: the input is
+        // complete where the output has the hole, so the nearest point is the
+        // surface the cap is supposed to recreate.
+        Vector3 projectedCenter;
+        if (projectPointToSource(center, averageEdge * 2.0, &projectedCenter))
+            center = projectedCenter;
+        const size_t centerIndex = m_remeshedVertices.size();
+        m_remeshedVertices.push_back(center);
+        std::vector<size_t> ring(count);
+        for (size_t i = 0; i < count; ++i) {
+            Vector3 midpoint = (m_remeshedVertices[polygon[i]] + center) * 0.5;
+            Vector3 projectedMidpoint;
+            if (projectPointToSource(midpoint, averageEdge * 2.0, &projectedMidpoint))
+                midpoint = projectedMidpoint;
+            ring[i] = m_remeshedVertices.size();
+            m_remeshedVertices.push_back(midpoint);
+        }
+        for (size_t i = 0; i < count; ++i)
+            addFace({ polygon[i], polygon[(i + 1) % count],
+                ring[(i + 1) % count], ring[i] });
+        if (0 == count % 2) {
+            for (size_t k = 0; k < count / 2; ++k)
+                addFace({ ring[2 * k], ring[(2 * k + 1) % count],
+                    ring[(2 * k + 2) % count], centerIndex });
+        } else {
+            for (size_t k = 0; k < (count - 1) / 2; ++k)
+                addFace({ ring[2 * k], ring[2 * k + 1], ring[2 * k + 2], centerIndex });
+            addFace({ ring[count - 1], ring[0], centerIndex });
+        }
+    } else {
+        const size_t centerIndex = m_remeshedVertices.size();
+        m_remeshedVertices.push_back(center);
+        if (0 == count % 2) {
+            for (size_t k = 0; k < count / 2; ++k)
+                addFace({ polygon[2 * k], polygon[(2 * k + 1) % count],
+                    polygon[(2 * k + 2) % count], centerIndex });
+        } else {
+            for (size_t k = 0; k < (count - 1) / 2; ++k)
+                addFace({ polygon[2 * k], polygon[2 * k + 1], polygon[2 * k + 2], centerIndex });
+            addFace({ polygon[count - 1], polygon[0], centerIndex });
+        }
+    }
+    if (newFaces.empty()) {
+        m_remeshedVertices.resize(firstNewVertex);
+        return 0;
+    }
+    for (auto& face : newFaces)
+        m_remeshedPolygons.push_back(std::move(face));
+    return newFaces.size();
+}
+
+size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
+{
+    // The twelve cleanup passes before this one each repair a single defect: a
+    // triangle pair becomes a quad, a six edge face is cut in two.  None of them
+    // can re-pair two faces whose *union* is worth changing, because the state
+    // halfway through such a move - a pentagon next to a triangle becomes a
+    // hexagon - scores worse than where it started, and a hill climb on one
+    // energy never walks uphill to get there.  That is exactly why the earlier
+    // prototype of this pass removed 0-3% of the leftovers: 85% of them are
+    // pentagons, and every pentagon fix of this shape is such a two step move.
+    //
+    // So this pass scores the end state only.  For two faces sharing an edge the
+    // union polygon is either kept as a single face or cut along any diagonal
+    // that is not already an edge.  Moves that become reachable:
+    //   pentagon + triangle -> two quads (a diagonal through the hexagon union)
+    //   pentagon + pentagon -> two quads (a four + four cut of the octagon union)
+    //   quad + quad -> quad + quad with the diagonals swapped, which only pays
+    //                  off when it annihilates a valence five vertex against a
+    //                  valence three one
+    // Every result is checked for convexity, folding and planarity, so the
+    // projection pass afterwards is not asked to undo a fold.
+
+    if (m_remeshedPolygons.empty() || m_remeshedVertices.empty())
+        return 0;
+
+    const double valenceWeight = 0.25;
+    const bool trace = nullptr != getenv("AR_TOPO_STATS");
+    using Edge = std::pair<size_t, size_t>;
+    const auto edgeOf = [](size_t a, size_t b) {
+        return std::make_pair(std::min(a, b), std::max(a, b));
+    };
+    const auto faceEnergy = [](size_t size) {
+        const double delta = (double)size - 4.0;
+        return delta * delta;
+    };
+    // Corners around a vertex stand in for its valence: the two differ by a
+    // constant on the boundary and only the change enters the energy.
+    const auto valenceEnergy = [valenceWeight](size_t valence) {
+        const double delta = (double)valence - 4.0;
+        return valenceWeight * delta * delta;
+    };
+
+    std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    std::vector<size_t> vertexValence;
+    const auto buildIndex = [&]() {
+        edgeFaces.clear();
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
+        vertexValence.assign(m_remeshedVertices.size(), 0);
+        for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
+            const auto& face = m_remeshedPolygons[faceIndex];
+            for (size_t i = 0; i < face.size(); ++i) {
+                edgeFaces[edgeOf(face[i], face[(i + 1) % face.size()])].push_back(faceIndex);
+                ++vertexValence[face[i]];
+            }
+        }
+    };
+    const auto dropFace = [&](size_t faceIndex) {
+        const auto& face = m_remeshedPolygons[faceIndex];
+        for (size_t i = 0; i < face.size(); ++i) {
+            const auto found = edgeFaces.find(edgeOf(face[i], face[(i + 1) % face.size()]));
+            if (edgeFaces.end() == found)
+                continue;
+            auto& owners = found->second;
+            for (size_t k = 0; k < owners.size(); ++k) {
+                if (owners[k] != faceIndex)
+                    continue;
+                owners.erase(owners.begin() + k);
+                break;
+            }
+            if (owners.empty())
+                edgeFaces.erase(found);
+        }
+        for (const size_t vertex : face) {
+            if (vertex < vertexValence.size() && vertexValence[vertex] > 0)
+                --vertexValence[vertex];
+        }
+    };
+    const auto addFace = [&](size_t faceIndex) {
+        const auto& face = m_remeshedPolygons[faceIndex];
+        for (size_t i = 0; i < face.size(); ++i) {
+            edgeFaces[edgeOf(face[i], face[(i + 1) % face.size()])].push_back(faceIndex);
+            ++vertexValence[face[i]];
+        }
+    };
+
+    // The union of the two faces, walked with the winding of the first one.  The
+    // shared edge has to run a->b in f and b->a in g, otherwise the two faces are
+    // wound the same way and there is no consistent union.
+    std::vector<size_t> unionPolygon;
+    const auto buildUnion = [&](size_t f, size_t g) {
+        const auto& faceF = m_remeshedPolygons[f];
+        const auto& faceG = m_remeshedPolygons[g];
+        const size_t nf = faceF.size();
+        const size_t ng = faceG.size();
+        if (nf < 3 || ng < 3)
+            return false;
+        for (size_t i = 0; i < nf; ++i) {
+            const size_t a = faceF[i];
+            const size_t b = faceF[(i + 1) % nf];
+            size_t gIndex = ng;
+            for (size_t k = 0; k < ng; ++k) {
+                if (faceG[k] == b && faceG[(k + 1) % ng] == a) {
+                    gIndex = k;
+                    break;
+                }
+            }
+            if (gIndex == ng)
+                continue;
+            unionPolygon.clear();
+            unionPolygon.reserve(nf + ng - 2);
+            for (size_t k = 0; k < nf; ++k)
+                unionPolygon.push_back(faceF[(i + 1 + k) % nf]);
+            for (size_t k = 2; k < ng; ++k)
+                unionPolygon.push_back(faceG[(gIndex + k) % ng]);
+            if (unionPolygon.size() != nf + ng - 2)
+                continue;
+            return true;
+        }
+        return false;
+    };
+
+    // A face that is convex, not folded and close to planar.  A near straight
+    // corner is refused: the projection turns such a sliver into a fold.
+    const auto isValidFace = [&](const std::vector<size_t>& face) {
+        const size_t count = face.size();
+        if (count < 3)
+            return false;
+        {
+            std::vector<size_t> sorted(face);
+            std::sort(sorted.begin(), sorted.end());
+            if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+                return false;
+        }
+        const Vector3 origin = m_remeshedVertices[face[0]];
+        Vector3 normal;
+        Vector3 center;
+        double perimeter = 0.0;
+        for (size_t i = 0; i < count; ++i) {
+            const Vector3& current = m_remeshedVertices[face[i]];
+            const Vector3& next = m_remeshedVertices[face[(i + 1) % count]];
+            normal += Vector3::crossProduct(current - origin, next - origin);
+            perimeter += (next - current).length();
+            center += current;
+        }
+        center /= (double)count;
+        const double normalLength = normal.length();
+        const double averageEdge = perimeter / (double)count;
+        if (!(normalLength > 1e-30) || !(averageEdge > 1e-30))
+            return false;
+        const Vector3 unitNormal = normal / normalLength;
+        double minimumSine = 1.0;
+        for (size_t i = 0; i < count; ++i) {
+            const Vector3& previous = m_remeshedVertices[face[(i + count - 1) % count]];
+            const Vector3& current = m_remeshedVertices[face[i]];
+            const Vector3& next = m_remeshedVertices[face[(i + 1) % count]];
+            const Vector3 incoming = current - previous;
+            const Vector3 outgoing = next - current;
+            const double scale = incoming.length() * outgoing.length();
+            const Vector3 corner = Vector3::crossProduct(incoming, outgoing);
+            if (Vector3::dotProduct(corner, unitNormal) <= 0.0)
+                return false;
+            if (scale > 0.0)
+                minimumSine = std::min(minimumSine, corner.length() / scale);
+        }
+        if (minimumSine < 0.10)
+            return false;
+        double planarity = 0.0;
+        for (size_t i = 0; i < count; ++i)
+            planarity = std::max(planarity,
+                std::fabs(Vector3::dotProduct(m_remeshedVertices[face[i]] - center, unitNormal)));
+        return planarity <= averageEdge * 0.5;
+    };
+
+    // The pass never leaves the mesh with more non-quad faces than it found, and
+    // when it cannot remove one it only reorganises quads: a diagonal swap that
+    // trades a valence five vertex against a valence three one for two valence
+    // fours.  Without that rule a pentagon next to a quad can be re-paired into
+    // another pentagon and a quad over and over, which is churn, not progress.
+    const auto acceptsMove = [](size_t nonQuadBefore, size_t nonQuadAfter, double delta) {
+        if (delta >= -1e-9)
+            return false;
+        if (nonQuadAfter > nonQuadBefore)
+            return false;
+        if (nonQuadAfter == nonQuadBefore && nonQuadAfter > 0)
+            return false;
+        return true;
+    };
+
+    struct Move {
+        double delta = 0.0;
+        size_t kind = 0; // 0 keeps the union as one face, 1 cuts it in two
+        size_t pairFace = 0;
+        size_t first = 0;
+        size_t second = 0;
+    };
+    std::vector<Move> candidates;
+    std::vector<size_t> firstFace;
+    std::vector<size_t> secondFace;
+    std::vector<std::pair<size_t, int>> valenceDeltas;
+    std::unordered_set<size_t> touchedVertices;
+
+    buildIndex();
+
+    if (trace) {
+        std::map<size_t, size_t> sizeHistogram;
+        for (const auto& face : m_remeshedPolygons)
+            ++sizeHistogram[face.size()];
+        fprintf(stderr, "[topo] before, faces by size:");
+        for (const auto& it : sizeHistogram)
+            fprintf(stderr, " %zu:%zu", it.first, it.second);
+        fprintf(stderr, "\n");
+        // Which re-pairings are even available: edge adjacent pairs where at
+        // least one side is not a quad, keyed by the two face sizes.
+        std::map<std::pair<size_t, size_t>, size_t> pairCensus;
+        for (const auto& it : edgeFaces) {
+            if (2 != it.second.size())
+                continue;
+            const size_t firstSize = m_remeshedPolygons[it.second[0]].size();
+            const size_t secondSize = m_remeshedPolygons[it.second[1]].size();
+            if (4 == firstSize && 4 == secondSize)
+                continue;
+            ++pairCensus[std::make_pair(std::min(firstSize, secondSize),
+                std::max(firstSize, secondSize))];
+        }
+        fprintf(stderr, "[topo] candidate pairs (small:large):");
+        for (const auto& it : pairCensus)
+            fprintf(stderr, " %zu:%zu=%zu", it.first.first, it.first.second, it.second);
+        fprintf(stderr, "\n");
+    }
+
+    size_t mergeCount = 0;
+    size_t splitCount = 0;
+    size_t applied = 0;
+
+    const auto addValenceDelta = [&](size_t vertex, int delta) {
+        for (auto& it : valenceDeltas) {
+            if (it.first != vertex)
+                continue;
+            it.second += delta;
+            return;
+        }
+        valenceDeltas.emplace_back(vertex, delta);
+    };
+    const auto valenceDeltaEnergy = [&]() {
+        double total = 0.0;
+        for (const auto& it : valenceDeltas) {
+            if (0 == it.second || it.first >= vertexValence.size())
+                continue;
+            const long long value = (long long)vertexValence[it.first] + it.second;
+            if (value < 0)
+                continue;
+            total += valenceEnergy((size_t)value) - valenceEnergy(vertexValence[it.first]);
+        }
+        return total;
+    };
+
+    // One improvement for face f, if any of its edges has one.  Returns true when
+    // an operation was applied, in which case the adjacency is already patched.
+    const auto tryImprove = [&](size_t f) {
+        const size_t faceSize = m_remeshedPolygons[f].size();
+        if (faceSize < 3)
+            return false;
+        candidates.clear();
+        const auto& faceF = m_remeshedPolygons[f];
+        for (size_t i = 0; i < faceSize; ++i) {
+            const auto ownersIt = edgeFaces.find(edgeOf(faceF[i], faceF[(i + 1) % faceSize]));
+            if (edgeFaces.end() == ownersIt || 2 != ownersIt->second.size())
+                continue;
+            const size_t g = ownersIt->second[0] == f ? ownersIt->second[1] : ownersIt->second[0];
+            if (g == f || g < f)
+                continue;
+            if (!buildUnion(f, g))
+                continue;
+            const size_t n = unionPolygon.size();
+            if (n < 4 || n > 10)
+                continue;
+            {
+                std::vector<size_t> sorted(unionPolygon);
+                std::sort(sorted.begin(), sorted.end());
+                if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+                    continue;
+            }
+            const size_t sharedFirst = unionPolygon[0];
+            const size_t sharedSecond = unionPolygon[faceSize - 1];
+            const size_t otherSize = m_remeshedPolygons[g].size();
+            const double before = faceEnergy(faceSize) + faceEnergy(otherSize);
+            const size_t nonQuadBefore = (4 == faceSize ? 0 : 1) + (4 == otherSize ? 0 : 1);
+
+            if (n <= 8) {
+                valenceDeltas.clear();
+                addValenceDelta(sharedFirst, -1);
+                addValenceDelta(sharedSecond, -1);
+                Move move;
+                move.kind = 0;
+                move.pairFace = g;
+                move.delta = faceEnergy(n) - before + valenceDeltaEnergy();
+                if (acceptsMove(nonQuadBefore, 4 == n ? 0 : 1, move.delta))
+                    candidates.push_back(move);
+            }
+            for (size_t p = 0; p + 2 < n; ++p) {
+                for (size_t q = p + 2; q < n; ++q) {
+                    const size_t firstSize = q - p + 1;
+                    const size_t secondSize = n - firstSize + 2;
+                    if (firstSize < 3 || secondSize < 3)
+                        continue;
+                    // Re-adding the edge the two faces already share is not a move
+                    if (edgeFaces.end() != edgeFaces.find(edgeOf(unionPolygon[p], unionPolygon[q])))
+                        continue;
+                    valenceDeltas.clear();
+                    addValenceDelta(sharedFirst, -1);
+                    addValenceDelta(sharedSecond, -1);
+                    addValenceDelta(unionPolygon[p], 1);
+                    addValenceDelta(unionPolygon[q], 1);
+                    Move move;
+                    move.kind = 1;
+                    move.pairFace = g;
+                    move.first = p;
+                    move.second = q;
+                    move.delta = faceEnergy(firstSize) + faceEnergy(secondSize) - before
+                        + valenceDeltaEnergy();
+                    if (acceptsMove(nonQuadBefore, (4 == firstSize ? 0 : 1) + (4 == secondSize ? 0 : 1),
+                            move.delta))
+                        candidates.push_back(move);
+                }
+            }
+        }
+        if (candidates.empty())
+            return false;
+        std::sort(candidates.begin(), candidates.end(), [](const Move& left, const Move& right) {
+            if (left.delta != right.delta)
+                return left.delta < right.delta;
+            if (left.kind != right.kind)
+                return left.kind < right.kind;
+            if (left.pairFace != right.pairFace)
+                return left.pairFace < right.pairFace;
+            return left.first < right.first;
+        });
+
+        // The cheapest move whose result is geometrically sound wins; a rejected
+        // candidate means the next one down the list is tried
+        for (size_t k = 0; k < candidates.size() && k < 8; ++k) {
+            const Move move = candidates[k];
+            const size_t g = move.pairFace;
+            if (g >= m_remeshedPolygons.size() || m_remeshedPolygons[g].size() < 3)
+                continue;
+            if (!buildUnion(f, g))
+                continue;
+            if (0 == move.kind) {
+                if (!isValidFace(unionPolygon))
+                    continue;
+                const std::vector<size_t> merged = unionPolygon;
+                const size_t mergedFrom = m_remeshedPolygons[f].size() + m_remeshedPolygons[g].size();
+                dropFace(f);
+                dropFace(g);
+                m_remeshedPolygons[f] = merged;
+                m_remeshedPolygons[g].clear();
+                addFace(f);
+                for (const size_t vertex : merged)
+                    touchedVertices.insert(vertex);
+                ++mergeCount;
+                if (trace)
+                    fprintf(stderr, "[topo] merge %zu -> %zu\n", mergedFrom, merged.size());
+                return true;
+            }
+            const size_t n = unionPolygon.size();
+            firstFace.assign(unionPolygon.begin() + move.first,
+                unionPolygon.begin() + move.second + 1);
+            secondFace.clear();
+            for (size_t m = move.second; m < n; ++m)
+                secondFace.push_back(unionPolygon[m]);
+            for (size_t m = 0; m <= move.first; ++m)
+                secondFace.push_back(unionPolygon[m]);
+            if (!isValidFace(firstFace) || !isValidFace(secondFace))
+                continue;
+            dropFace(f);
+            dropFace(g);
+            m_remeshedPolygons[f] = firstFace;
+            m_remeshedPolygons[g] = secondFace;
+            addFace(f);
+            addFace(g);
+            for (const size_t vertex : firstFace)
+                touchedVertices.insert(vertex);
+            for (const size_t vertex : secondFace)
+                touchedVertices.insert(vertex);
+            ++splitCount;
+            if (trace)
+                fprintf(stderr, "[topo] split %zu -> %zu+%zu\n", n, firstFace.size(),
+                    secondFace.size());
+            return true;
+        }
+        return false;
+    };
+
+    for (size_t round = 0; round < 8 && applied < maximumOperations; ++round) {
+        bool changed = false;
+        for (size_t f = 0; f < m_remeshedPolygons.size() && applied < maximumOperations; ++f) {
+            for (size_t attempt = 0; attempt < 4; ++attempt) {
+                if (!tryImprove(f))
+                    break;
+                ++applied;
+                changed = true;
+            }
+        }
+        if (!changed)
+            break;
+    }
+
+    m_remeshedPolygons.erase(std::remove_if(m_remeshedPolygons.begin(),
+                                 m_remeshedPolygons.end(),
+                                 [](const std::vector<size_t>& face) { return face.empty(); }),
+        m_remeshedPolygons.end());
+
+    if (trace) {
+        std::map<size_t, size_t> sizeHistogram;
+        for (const auto& face : m_remeshedPolygons)
+            ++sizeHistogram[face.size()];
+        fprintf(stderr, "[topo] applied merges:%zu splits:%zu, faces by size now:",
+            mergeCount, splitCount);
+        for (const auto& it : sizeHistogram)
+            fprintf(stderr, " %zu:%zu", it.first, it.second);
+        fprintf(stderr, "\n");
+    }
+
+    // Pull the rewired patches back onto the source surface, the way every other
+    // cleanup pass ends
+    if (!touchedVertices.empty())
+        smoothAroundVertices(touchedVertices, 3, 5);
+
+    return applied;
+}
+
+size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
+{
+    // The two face re-pairing above is provably unable to remove a pentagon that
+    // is surrounded by quads: re-pairing the union of k faces keeps the sum of
+    // their corner counts, so pentagon + quad (nine corners) can only become
+    // 4+5 or 3+6, and the only pairs that reach two quads are 3+5 and 3+3.  A
+    // census of the extraction output shows that is exactly the rare case
+    // (head_clean: 1718 pentagon/quad adjacencies against 8 pentagon/triangle
+    // ones), which is why the earlier passes and the re-pairing measured 0-3%.
+    //
+    // The freedom a patch has and a pair does not is that the *interior* vertices
+    // of the patch may be dropped.  Cut out a small disk around a non-quad, keep
+    // its boundary loop, and the loop can be quadrangulated by diagonals alone as
+    // long as it has an even number of corners; the corner deficit that made the
+    // pentagon a pentagon disappears with the interior vertex.  A ten corner ring
+    // around a pentagon becomes four quads, and the projection pass afterwards
+    // pulls those quads back onto the source surface.
+
+    if (m_remeshedPolygons.empty() || m_remeshedVertices.empty())
+        return 0;
+
+    const bool trace = nullptr != getenv("AR_TOPO_STATS");
+    using Edge = std::pair<size_t, size_t>;
+    const auto edgeOf = [](size_t a, size_t b) {
+        return std::make_pair(std::min(a, b), std::max(a, b));
+    };
+    const double invalidCost = 1e18;
+    // Edges the patch boundary owns.  A quadrangulation may use those, and it may
+    // introduce new diagonals, but it must never reuse an edge that already exists
+    // somewhere else: that edge would gain a third owner and turn non-manifold.
+    std::unordered_set<Edge, CleanupEdgeHash> patchBoundaryEdges;
+    // Edges that live entirely inside the patch.  They disappear with the patch
+    // faces, so a quadrangulation may recreate them freely
+    std::unordered_set<Edge, CleanupEdgeHash> patchInteriorEdges;
+    // Every edge of the patch faces, used to tell whether a boundary vertex keeps
+    // enough of its edges to stay a proper mesh vertex
+    std::unordered_set<Edge, CleanupEdgeHash> patchEdgeSet;
+    // Edge to owning face index; rebuilt after every applied patch
+    std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    // How far a patch quad may lean before it is refused.  The projection pass
+    // that follows pulls the new quads onto the source surface, so a patch quad
+    // may be less flat than a face the extractor created from scratch.
+    static const double planarityLimit = []() {
+        const char* value = getenv("AR_PATCH_PLANARITY");
+        return nullptr != value ? atof(value) : 0.5;
+    }();
+    static const double sineLimit = []() {
+        const char* value = getenv("AR_PATCH_SINE");
+        return nullptr != value ? atof(value) : 0.05;
+    }();
+    // Interior-vertex-assisted quadrangulation: put a new point in the middle of a
+    // patch polygon and fan len/2 quads around it, instead of spanning the polygon
+    // with chords.  Chords are what made the boundary-only version fail: they have
+    // to cross the curved middle of the patch (poor planarity) and they can coincide
+    // with an edge that survives outside the patch (non-manifold).
+    static const bool fanEnabled = []() {
+        const char* value = getenv("AR_PATCH_FAN");
+        return nullptr != value ? 0 != atoi(value) : true;
+    }();
+    // A fan centre of valence four costs nothing, valence three or five is a new
+    // singularity: (len/2 - 4)^2 is what the re-pairing energy uses as well
+    // A centre fan with more than six corners makes a valence 6+ centre, which is a
+    // worse defect than the pentagon it removed, so large polygons have to be split
+    // by a chord first
+    static const size_t fanMaxCorners = []() {
+        const char* value = getenv("AR_PATCH_FAN_MAX");
+        return nullptr != value ? (size_t)atoi(value) : (size_t)12;
+    }();
+    static const double fanValenceWeight = []() {
+        const char* value = getenv("AR_PATCH_VALENCE");
+        return nullptr != value ? atof(value) : 0.5;
+    }();
+    // How much reflex a patch quad may have.  Patch boundaries follow the mesh
+    // structure, not a nice curve, so demanding strict convexity of every resulting
+    // quad rejects most patches.  The projection pass relaxes a mild reflex corner
+    // afterwards; a deep fold stays refused.
+    static const double reflexAllowance = []() {
+        const char* value = getenv("AR_PATCH_REFLEX");
+        return nullptr != value ? atof(value) : 0.8;
+    }();
+    // A patch replacement must not leave a boundary vertex with fewer edges than
+    // this; zero disables the check
+    // Keeps the old behaviour of rebuilding the whole edge index after every
+    // applied patch.  The incremental path is exact by construction, but this
+    // switch exists so the two can be compared bit for bit
+    static const bool rebuildIndexPerPatch = []() {
+        const char* value = getenv("AR_PATCH_REBUILD");
+        return nullptr != value && 0 != atoi(value);
+    }();
+    static const size_t minimumVertexValence = []() {
+        const char* value = getenv("AR_PATCH_VALENCE_FLOOR");
+        return nullptr != value ? (size_t)atoi(value) : (size_t)3;
+    }();
+
+    // The same geometric test the re-pairing uses: convex, not folded, close to
+    // planar.  Its result doubles as the quality term, so a patch that could be
+    // quadrangulated in several ways prefers the rounder one.
+    // Which geometric test refuses a candidate quad, counted for the report
+    size_t rejectDuplicate = 0;
+    size_t rejectEdge = 0;
+    size_t rejectNormal = 0;
+    size_t rejectReflex = 0;
+    size_t rejectSine = 0;
+    size_t rejectPlanarity = 0;
+    const auto quadCost = [&](size_t a, size_t b, size_t c, size_t d) {
+        const std::vector<size_t> face { a, b, c, d };
+        for (size_t i = 0; i < 4; ++i)
+            for (size_t j = i + 1; j < 4; ++j)
+                if (face[i] == face[j]) {
+                    ++rejectDuplicate;
+                    return invalidCost;
+                }
+        // Every edge the new quad would own has to be either new, on the patch
+        // boundary, or an edge the patch is about to delete.  Reusing an edge
+        // that survives outside the patch would give it a third owner
+        const auto reusable = [&](size_t u, size_t v) {
+            const Edge key = edgeOf(u, v);
+            if (edgeFaces.end() == edgeFaces.find(key))
+                return true;
+            return patchBoundaryEdges.end() != patchBoundaryEdges.find(key)
+                || patchInteriorEdges.end() != patchInteriorEdges.find(key);
+        };
+        const size_t ring[4] { a, b, c, d };
+        for (size_t i = 0; i < 4; ++i)
+            if (!reusable(ring[i], ring[(i + 1) % 4])) {
+                ++rejectEdge;
+                return invalidCost;
+            }
+        if (!reusable(a, c) || !reusable(b, d)) {
+            ++rejectEdge;
+            return invalidCost;
+        }
+        const Vector3& p0 = m_remeshedVertices[a];
+        const Vector3& p1 = m_remeshedVertices[b];
+        const Vector3& p2 = m_remeshedVertices[c];
+        const Vector3& p3 = m_remeshedVertices[d];
+        Vector3 normal;
+        normal += Vector3::crossProduct(p1 - p0, p2 - p0);
+        normal += Vector3::crossProduct(p2 - p0, p3 - p0);
+        const double normalLength = normal.length();
+        if (!(normalLength > 1e-30)) {
+            ++rejectNormal;
+            return invalidCost;
+        }
+        const Vector3 unitNormal = normal / normalLength;
+        const Vector3 corners[4] { p0, p1, p2, p3 };
+        double minimumSine = 1.0;
+        double perimeter = 0.0;
+        double reflexCost = 0.0;
+        for (size_t i = 0; i < 4; ++i) {
+            const Vector3& previous = corners[(i + 3) % 4];
+            const Vector3& current = corners[i];
+            const Vector3& next = corners[(i + 1) % 4];
+            const Vector3 incoming = current - previous;
+            const Vector3 outgoing = next - current;
+            perimeter += outgoing.length();
+            const double scale = incoming.length() * outgoing.length();
+            const Vector3 corner = Vector3::crossProduct(incoming, outgoing);
+            const double cornerLength = corner.length();
+            const double reflex = cornerLength > 0.0
+                ? -Vector3::dotProduct(corner, unitNormal) / cornerLength
+                : 0.0;
+            if (reflex > reflexAllowance) {
+                ++rejectReflex;
+                return invalidCost;
+            }
+            if (reflex > 0.0)
+                reflexCost += reflex;
+            if (scale > 0.0)
+                minimumSine = std::min(minimumSine, cornerLength / scale);
+        }
+        const double averageEdge = perimeter * 0.25;
+        if (!(averageEdge > 1e-30) || minimumSine < sineLimit) {
+            ++rejectSine;
+            return invalidCost;
+        }
+        // A quad whose area is a hundredth of its own edge square is a sliver: it
+        // passes the corner test but shows up as a degenerate face downstream
+        if (0.5 * normalLength < 0.01 * averageEdge * averageEdge) {
+            ++rejectSine;
+            return invalidCost;
+        }
+        const Vector3 center = (p0 + p1 + p2 + p3) * 0.25;
+        double planarity = 0.0;
+        for (size_t i = 0; i < 4; ++i)
+            planarity = std::max(planarity,
+                std::fabs(Vector3::dotProduct(corners[i] - center, unitNormal)));
+        if (planarity > averageEdge * planarityLimit) {
+            ++rejectPlanarity;
+            return invalidCost;
+        }
+        // Round, near square quads cost less than slivers, and a reflex corner is
+        // paid for on top so a straight version of the same patch still wins
+        return (1.0 - minimumSine) + planarity / averageEdge + 4.0 * reflexCost;
+    };
+
+    std::vector<size_t> vertexValence;
+    const auto buildIndex = [&]() {
+        edgeFaces.clear();
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
+        for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
+            const auto& face = m_remeshedPolygons[faceIndex];
+            for (size_t i = 0; i < face.size(); ++i)
+                edgeFaces[edgeOf(face[i], face[(i + 1) % face.size()])].push_back(faceIndex);
+        }
+        vertexValence.assign(m_remeshedVertices.size(), 0);
+        for (const auto& it : edgeFaces) {
+            ++vertexValence[it.first.first];
+            ++vertexValence[it.first.second];
+        }
+    };
+    // Patching a face set only touches the edges of those faces and of the quads
+    // that replace them, so the index is patched in place.  Rebuilding it once per
+    // applied patch was a full sweep of the mesh per patch (161 patches on a 100k
+    // target meant 64 million edge insertions).
+    // Valence counts *distinct* incident edges, so an edge only counts when it
+    // appears in the mesh and stops counting only when its last owner is gone.
+    // Counting per face would double count every interior edge.
+    const auto indexDropFace = [&](size_t faceIndex) {
+        const auto& face = m_remeshedPolygons[faceIndex];
+        for (size_t i = 0; i < face.size(); ++i) {
+            const auto found = edgeFaces.find(edgeOf(face[i], face[(i + 1) % face.size()]));
+            if (edgeFaces.end() == found)
+                continue;
+            auto& owners = found->second;
+            for (size_t k = 0; k < owners.size(); ++k) {
+                if (owners[k] != faceIndex)
+                    continue;
+                owners.erase(owners.begin() + k);
+                break;
+            }
+            if (!owners.empty())
+                continue;
+            const std::pair<size_t, size_t> key = found->first;
+            edgeFaces.erase(found);
+            for (const size_t vertex : { key.first, key.second }) {
+                if (vertex < vertexValence.size() && vertexValence[vertex] > 0)
+                    --vertexValence[vertex];
+            }
+        }
+    };
+    const auto indexAddFace = [&](size_t faceIndex) {
+        const auto& face = m_remeshedPolygons[faceIndex];
+        for (size_t i = 0; i < face.size(); ++i) {
+            const std::pair<size_t, size_t> key = edgeOf(face[i], face[(i + 1) % face.size()]);
+            const bool isNewEdge = edgeFaces.end() == edgeFaces.find(key);
+            edgeFaces[key].push_back(faceIndex);
+            if (!isNewEdge)
+                continue;
+            for (const size_t vertex : { key.first, key.second }) {
+                if (vertex >= vertexValence.size())
+                    vertexValence.resize(vertex + 1, 0);
+                ++vertexValence[vertex];
+            }
+        }
+    };
+
+    static const size_t maximumPatchFaces = []() {
+        const char* value = getenv("AR_PATCH_FACES");
+        return nullptr != value ? (size_t)atoi(value) : (size_t)20;
+    }();
+    static const size_t maximumBoundaryCorners = []() {
+        const char* value = getenv("AR_PATCH_CORNERS");
+        return nullptr != value ? (size_t)atoi(value) : (size_t)22;
+    }();
+    std::vector<size_t> patchFaces;
+    std::vector<size_t> grownFaces;
+    std::vector<char> inPatch;
+    std::vector<size_t> boundaryLoop;
+    std::vector<size_t> touchedVertices;
+    size_t applied = 0;
+    size_t attempts = 0;
+    size_t oddBoundary = 0;
+    size_t geometryRejected = 0;
+    size_t valenceRejected = 0;
+    size_t convexLoops = 0;
+    size_t concaveGrowth = 0;
+
+    // Concave corners of the projected boundary, worst first.  Every quad has to
+    // cover the boundary edges at a concave corner and such a quad is concave
+    // itself, which is what the geometry test refuses: 88% of all quad refusals
+    // are reflex ones.  Growing the patch *at those corners* is the way to hand
+    // the quadrangulation a boundary it can satisfy.
+    std::vector<std::pair<double, size_t>> reflexCorners;
+    const auto collectReflexCorners = [&]() {
+        const size_t count = boundaryLoop.size();
+        if (count < 4)
+            return;
+        const Vector3 origin = m_remeshedVertices[boundaryLoop[0]];
+        Vector3 normal;
+        Vector3 center;
+        for (size_t i = 0; i < count; ++i) {
+            const Vector3& current = m_remeshedVertices[boundaryLoop[i]];
+            const Vector3& next = m_remeshedVertices[boundaryLoop[(i + 1) % count]];
+            normal += Vector3::crossProduct(current - origin, next - origin);
+            center += current;
+        }
+        center /= (double)count;
+        const double normalLength = normal.length();
+        if (!(normalLength > 1e-30))
+            return;
+        const Vector3 unitNormal = normal / normalLength;
+        const Vector3 reference = m_remeshedVertices[boundaryLoop[1]] - origin;
+        if (!(reference.length() > 1e-30))
+            return;
+        const Vector3 tangent = reference.normalized();
+        const Vector3 bitangent = Vector3::crossProduct(unitNormal, tangent);
+        std::vector<Vector2> flat(count);
+        for (size_t i = 0; i < count; ++i) {
+            const Vector3 offset = m_remeshedVertices[boundaryLoop[i]] - center;
+            flat[i] = Vector2(Vector3::dotProduct(offset, tangent),
+                Vector3::dotProduct(offset, bitangent));
+        }
+        double twiceArea = 0.0;
+        for (size_t i = 0; i < count; ++i) {
+            const Vector2& current = flat[i];
+            const Vector2& next = flat[(i + 1) % count];
+            twiceArea += current.x() * next.y() - next.x() * current.y();
+        }
+        const double orientation = twiceArea >= 0.0 ? 1.0 : -1.0;
+        for (size_t i = 0; i < count; ++i) {
+            const Vector2& previous = flat[(i + count - 1) % count];
+            const Vector2& current = flat[i];
+            const Vector2& next = flat[(i + 1) % count];
+            const Vector2 incoming = current - previous;
+            const Vector2 outgoing = next - current;
+            const double scale = incoming.length() * outgoing.length();
+            if (!(scale > 1e-30))
+                continue;
+            const double turn = incoming.x() * outgoing.y() - incoming.y() * outgoing.x();
+            const double sine = orientation * turn / scale;
+            if (sine < -1e-6)
+                reflexCorners.emplace_back(-sine, i);
+        }
+        std::sort(reflexCorners.begin(), reflexCorners.end(),
+            [](const std::pair<double, size_t>& left, const std::pair<double, size_t>& right) {
+                return left.first > right.first;
+            });
+    };
+
+    // Corners that make the patch fail, worst first: concave corners (the quads
+    // covering them are concave, which the geometry test refuses) and boundary
+    // vertices already at valence three, because replacing a patch costs every
+    // boundary corner one valence and those would drop to two.
+    std::vector<std::pair<double, size_t>> problemCorners;
+    const auto collectProblemCorners = [&]() {
+        problemCorners = reflexCorners;
+        for (size_t i = 0; i < boundaryLoop.size(); ++i) {
+            const size_t vertex = boundaryLoop[i];
+            const size_t valence = vertex < vertexValence.size() ? vertexValence[vertex] : 4;
+            if (valence > 3)
+                continue;
+            problemCorners.emplace_back(10.0 + (3.0 - (double)valence), i);
+        }
+        std::sort(problemCorners.begin(), problemCorners.end(),
+            [](const std::pair<double, size_t>& left, const std::pair<double, size_t>& right) {
+                return left.first > right.first;
+            });
+    };
+
+    buildIndex();
+    inPatch.assign(m_remeshedPolygons.size(), 0);
+
+    for (size_t seed = 0; seed < m_remeshedPolygons.size() && applied < maximumPatches; ++seed) {
+        if (4 == m_remeshedPolygons[seed].size() || m_remeshedPolygons[seed].empty())
+            continue;
+        patchFaces.assign(1, seed);
+        inPatch[seed] = 1;
+        bool solved = false;
+        for (size_t grow = 0; grow < 8 && !solved; ++grow) {
+            if (patchFaces.size() > maximumPatchFaces)
+                break;
+            // Boundary of the patch: directed corners whose opposite is missing
+            // inside the patch.  A single closed loop is required, otherwise the
+            // patch is not a disk and cannot be quadrangulated as one.
+            std::unordered_map<size_t, size_t> next;
+            bool loopValid = true;
+            for (const size_t faceIndex : patchFaces) {
+                if (!loopValid)
+                    break;
+                const auto& face = m_remeshedPolygons[faceIndex];
+                for (size_t i = 0; i < face.size(); ++i) {
+                    const size_t a = face[i];
+                    const size_t b = face[(i + 1) % face.size()];
+                    const auto ownersIt = edgeFaces.find(edgeOf(a, b));
+                    if (edgeFaces.end() == ownersIt || 2 != ownersIt->second.size()) {
+                        // A non-manifold edge or an open boundary edge would leave a
+                        // crack when the patch faces are replaced
+                        loopValid = false;
+                        break;
+                    }
+                    size_t insideCount = 0;
+                    for (const size_t owner : ownersIt->second)
+                        if (inPatch[owner])
+                            ++insideCount;
+                    if (2 == insideCount) {
+                        patchInteriorEdges.insert(edgeOf(a, b));
+                        continue; // interior edge of the patch
+                    }
+                    if (1 != insideCount) {
+                        loopValid = false;
+                        break;
+                    }
+                    if (next.end() != next.find(a)) {
+                        // The boundary touches itself here; quadrangulating it would
+                        // produce a non-manifold corner
+                        loopValid = false;
+                        break;
+                    }
+                    next[a] = b;
+                }
+            }
+            patchBoundaryEdges.clear();
+            patchInteriorEdges.clear();
+            patchEdgeSet.clear();
+            for (const size_t faceIndex : patchFaces) {
+                const auto& face = m_remeshedPolygons[faceIndex];
+                for (size_t i = 0; i < face.size(); ++i)
+                    patchEdgeSet.insert(edgeOf(face[i], face[(i + 1) % face.size()]));
+            }
+            if (loopValid && !next.empty()) {
+                for (const auto& it : next)
+                    patchBoundaryEdges.insert(edgeOf(it.first, it.second));
+                boundaryLoop.clear();
+                const size_t start = next.begin()->first;
+                size_t current = start;
+                for (size_t step = 0; step <= next.size(); ++step) {
+                    boundaryLoop.push_back(current);
+                    const auto found = next.find(current);
+                    if (next.end() == found) {
+                        loopValid = false;
+                        break;
+                    }
+                    current = found->second;
+                    if (current == start)
+                        break;
+                }
+                // The walk has to close exactly once, visit every boundary vertex
+                // and leave no boundary corner behind
+                if (loopValid
+                    && (boundaryLoop.size() != next.size() || current != start))
+                    loopValid = false;
+            } else {
+                loopValid = false;
+            }
+
+            // Concave corners of the projected boundary.  Every quad has to cover
+            // the boundary edges at a concave corner, and such a quad is concave
+            // itself, which is what the geometry test refuses: 88% of all refusals
+            // are reflex ones.  Growing the patch *at those corners* is the only way
+            // to give the quadrangulation a boundary it can actually satisfy.
+            reflexCorners.clear();
+            problemCorners.clear();
+            if (loopValid) {
+                collectReflexCorners();
+                collectProblemCorners();
+            }
+            if (loopValid) {
+                const size_t corners = boundaryLoop.size();
+                ++attempts;
+                if (reflexCorners.empty())
+                    ++convexLoops;
+                if (0 != corners % 2 || corners > maximumBoundaryCorners)
+                    ++oddBoundary;
+                if (corners >= 4 && corners <= maximumBoundaryCorners && 0 == corners % 2) {
+                    // A chord splits an even cycle of length L into two even cycles
+                    // of length d+1 and L-d+1, and a cycle of four corners is one
+                    // quad.  The sub-polygons are carried as corner lists instead of
+                    // (start, length) offsets: once a chord's second side wraps past
+                    // the original start, the offsets no longer describe a
+                    // contiguous arc of the global loop, which silently produced
+                    // quads that reused corners the sub-polygon did not own and left
+                    // the patch boundary partly uncovered.
+                    std::vector<std::vector<size_t>> bestQuads;
+                    double bestTotal = invalidCost;
+                    // Sub-polygons are contiguous arcs of the boundary loop, so the
+                    // same arc is reached through many different split orders.  Without
+                    // this memo the search is exponential in the corner count (28
+                    // corners took 58 s); with it every arc is solved once.
+                    std::unordered_map<uint64_t,
+                        std::pair<double, std::vector<std::vector<size_t>>>>
+                        polygonMemo;
+                    const auto polygonKey = [](const std::vector<size_t>& polygon) {
+                        uint64_t hash = 1469598103934665603ull;
+                        for (const size_t vertex : polygon) {
+                            hash ^= (uint64_t)vertex + 0x9e3779b97f4a7c15ull;
+                            hash *= 1099511628211ull;
+                            hash ^= hash >> 29;
+                        }
+                        hash ^= (uint64_t)polygon.size();
+                        return hash;
+                    };
+                    std::function<double(const std::vector<size_t>&,
+                        std::vector<std::vector<size_t>>&)>
+                        solvePolygon
+                        = [&](const std::vector<size_t>& polygon,
+                              std::vector<std::vector<size_t>>& out) -> double {
+                        const size_t length = polygon.size();
+                        const uint64_t key = polygonKey(polygon);
+                        const auto memoIt = polygonMemo.find(key);
+                        if (polygonMemo.end() != memoIt) {
+                            out.insert(out.end(), memoIt->second.second.begin(),
+                                memoIt->second.second.end());
+                            return memoIt->second.first;
+                        }
+                        if (4 == length) {
+                            const double cost = quadCost(polygon[0], polygon[1], polygon[2],
+                                polygon[3]);
+                            if (cost < invalidCost)
+                                out.push_back(polygon);
+                            return cost;
+                        }
+                        double best = invalidCost;
+                        std::vector<std::vector<size_t>> bestHere;
+                        for (size_t split = 3; split + 3 <= length; split += 2) {
+                            std::vector<size_t> first(polygon.begin(),
+                                polygon.begin() + (std::ptrdiff_t)split + 1);
+                            std::vector<size_t> second(
+                                polygon.begin() + (std::ptrdiff_t)split, polygon.end());
+                            second.push_back(polygon[0]);
+                            std::vector<std::vector<size_t>> firstQuads;
+                            std::vector<std::vector<size_t>> secondQuads;
+                            const double firstCost = solvePolygon(first, firstQuads);
+                            if (firstCost >= invalidCost)
+                                continue;
+                            const double secondCost = solvePolygon(second, secondQuads);
+                            if (secondCost >= invalidCost)
+                                continue;
+                            if (firstCost + secondCost < best) {
+                                best = firstCost + secondCost;
+                                bestHere = firstQuads;
+                                bestHere.insert(bestHere.end(), secondQuads.begin(),
+                                    secondQuads.end());
+                            }
+                        }
+                        // Interior-vertex option: one new point in the middle of this
+                        // polygon and len/2 quads fanned around it.  Every quad then
+                        // spans two boundary edges and one radial edge, so nothing has
+                        // to cut across the patch and no chord can hit an edge that
+                        // survives outside it.  A centre of valence four is free,
+                        // valence three or five is a new singularity and is paid for.
+                        if (fanEnabled && length >= 6 && length <= fanMaxCorners && 0 == length % 2) {
+                            Vector3 center;
+                            for (const size_t vertex : polygon)
+                                center += m_remeshedVertices[vertex];
+                            center /= (double)length;
+                            double radius = 0.0;
+                            for (size_t i = 0; i < length; ++i) {
+                                const Vector3 edge
+                                    = m_remeshedVertices[polygon[(i + 1) % length]]
+                                    - m_remeshedVertices[polygon[i]];
+                                radius = std::max(radius, edge.length());
+                            }
+                            Vector3 projected;
+                            if (radius > 0.0
+                                && projectPointToSource(center, radius * 2.0, &projected))
+                                center = projected;
+                            m_remeshedVertices.push_back(center);
+                            const size_t centerVertex = m_remeshedVertices.size() - 1;
+                            const double centerValence = (double)(length / 2);
+                            double fanCost = fanValenceWeight
+                                * (centerValence - 4.0) * (centerValence - 4.0);
+                            std::vector<std::vector<size_t>> fanQuads;
+                            fanQuads.reserve(length / 2);
+                            for (size_t i = 0; i < length; i += 2) {
+                                const double cost = quadCost(centerVertex, polygon[i],
+                                    polygon[(i + 1) % length], polygon[(i + 2) % length]);
+                                if (cost >= invalidCost) {
+                                    fanCost = invalidCost;
+                                    break;
+                                }
+                                fanCost += cost;
+                                fanQuads.push_back({ centerVertex, polygon[i],
+                                    polygon[(i + 1) % length], polygon[(i + 2) % length] });
+                            }
+                            if (fanCost < invalidCost && fanCost < best
+                                && fanQuads.size() * 4 == length * 2) {
+                                best = fanCost;
+                                bestHere = std::move(fanQuads);
+                            } else {
+                                m_remeshedVertices.pop_back();
+                            }
+                        }
+                        if (best < invalidCost)
+                            out.insert(out.end(), bestHere.begin(), bestHere.end());
+                        polygonMemo.emplace(key, std::make_pair(best, bestHere));
+                        return best;
+                    };
+                    const size_t vertexCountBefore = m_remeshedVertices.size();
+                    {
+                        std::vector<std::vector<size_t>> quads;
+                        bestTotal = solvePolygon(boundaryLoop, quads);
+                        bestQuads = std::move(quads);
+                        if (bestTotal >= invalidCost) {
+                            // Fan centres allocated by the rejected search are not
+                            // referenced by anything
+                            m_remeshedVertices.resize(vertexCountBefore);
+                        }
+                    }
+
+                    if (bestTotal < invalidCost) {
+                        // Replacing the patch drops every patch edge that the new
+                        // quads do not recreate.  A boundary vertex that loses all
+                        // but its two loop edges ends up valence two, a degenerate
+                        // corner, so such a solution is refused here instead of
+                        // being handed to the later passes to undo.
+                        bool valenceKept = true;
+                        if (minimumVertexValence > 0) {
+                            std::unordered_map<size_t, size_t> patchDegree;
+                            for (const auto& edge : patchEdgeSet) {
+                                ++patchDegree[edge.first];
+                                ++patchDegree[edge.second];
+                            }
+                            std::unordered_map<size_t, std::unordered_set<size_t>> keptNeighbors;
+                            for (const auto& face : bestQuads) {
+                                for (size_t i = 0; i < face.size(); ++i) {
+                                    const size_t a = face[i];
+                                    const size_t b = face[(i + 1) % face.size()];
+                                    keptNeighbors[a].insert(b);
+                                    keptNeighbors[b].insert(a);
+                                }
+                            }
+                            for (const size_t vertex : boundaryLoop) {
+                                const size_t before = vertex < vertexValence.size()
+                                    ? vertexValence[vertex]
+                                    : patchDegree[vertex];
+                                const size_t lost = patchDegree[vertex];
+                                const size_t kept = keptNeighbors[vertex].size();
+                                const long long after = (long long)before - (long long)lost
+                                    + (long long)kept;
+                                if (after < (long long)minimumVertexValence) {
+                                    valenceKept = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if (valenceKept) {
+                        for (const size_t faceIndex : patchFaces)
+                            indexDropFace(faceIndex);
+                        for (const size_t faceIndex : patchFaces)
+                            m_remeshedPolygons[faceIndex].clear();
+                        const size_t firstNewFace = m_remeshedPolygons.size();
+                        for (auto& face : bestQuads)
+                            m_remeshedPolygons.push_back(std::move(face));
+                        for (size_t faceIndex = firstNewFace; faceIndex < m_remeshedPolygons.size();
+                             ++faceIndex)
+                            indexAddFace(faceIndex);
+                        for (const size_t vertex : boundaryLoop)
+                            touchedVertices.push_back(vertex);
+                        for (const auto& face : bestQuads)
+                            for (const size_t vertex : face)
+                                touchedVertices.push_back(vertex);
+                        if (trace) {
+                            size_t openEdges = 0;
+                            size_t badEdges = 0;
+                            for (const auto& it : edgeFaces) {
+                                if (1 == it.second.size())
+                                    ++openEdges;
+                                else if (it.second.size() > 2)
+                                    ++badEdges;
+                            }
+                            fprintf(stderr, "[patch] %zu faces, %zu corners -> %zu quads, "
+                                            "open edges %zu, non-manifold %zu\n",
+                                patchFaces.size(), corners, bestQuads.size(), openEdges, badEdges);
+                        }
+                        ++applied;
+                        solved = true;
+                        if (rebuildIndexPerPatch)
+                            buildIndex();
+                        inPatch.resize(m_remeshedPolygons.size(), 0);
+                        break;
+                        }
+                        // A solution refused here would leave its fan centres behind
+                        m_remeshedVertices.resize(vertexCountBefore);
+                        ++valenceRejected;
+                    }
+                    if (bestTotal >= invalidCost)
+                        ++geometryRejected;
+                }
+            }
+
+            // Grow across the boundary edges at the worst concave corners first.
+            // Adding a whole ring instead changes the loop everywhere and usually
+            // keeps the same concavity, which is why it kept failing.
+            grownFaces.clear();
+            if (loopValid && !problemCorners.empty()) {
+                const size_t loopSize = boundaryLoop.size();
+                const size_t wanted = std::min<size_t>(2, problemCorners.size());
+                for (size_t k = 0; k < wanted; ++k) {
+                    const size_t cornerIndex = problemCorners[k].second % loopSize;
+                    for (size_t side = 0; side < 2; ++side) {
+                        const size_t edgeIndex = (cornerIndex + loopSize - 1 + side) % loopSize;
+                        const auto ownersIt = edgeFaces.find(edgeOf(boundaryLoop[edgeIndex],
+                            boundaryLoop[(edgeIndex + 1) % loopSize]));
+                        if (edgeFaces.end() == ownersIt)
+                            continue;
+                        for (const size_t owner : ownersIt->second) {
+                            if (owner >= inPatch.size() || inPatch[owner])
+                                continue;
+                            if (patchFaces.size() + grownFaces.size() >= maximumPatchFaces)
+                                break;
+                            inPatch[owner] = 1;
+                            grownFaces.push_back(owner);
+                        }
+                    }
+                }
+                if (!grownFaces.empty())
+                    ++concaveGrowth;
+            }
+            // The fallback ring growth, used when the loop is convex yet nothing
+            // could be quadrangulated on it
+            if (grownFaces.empty()) {
+            for (const size_t faceIndex : patchFaces) {
+                if (patchFaces.size() + grownFaces.size() >= maximumPatchFaces)
+                    break;
+                const auto& face = m_remeshedPolygons[faceIndex];
+                for (size_t i = 0; i < face.size(); ++i) {
+                    if (patchFaces.size() + grownFaces.size() >= maximumPatchFaces)
+                        break;
+                    const auto ownersIt = edgeFaces.find(edgeOf(face[i], face[(i + 1) % face.size()]));
+                    if (edgeFaces.end() == ownersIt)
+                        continue;
+                    for (const size_t owner : ownersIt->second) {
+                        if (owner >= inPatch.size() || inPatch[owner])
+                            continue;
+                        inPatch[owner] = 1;
+                        grownFaces.push_back(owner);
+                        if (patchFaces.size() + grownFaces.size() >= maximumPatchFaces)
+                            break;
+                    }
+                }
+            }
+            }
+            if (grownFaces.empty())
+                break;
+            patchFaces.insert(patchFaces.end(), grownFaces.begin(), grownFaces.end());
+        }
+        if (!solved) {
+            for (const size_t faceIndex : patchFaces)
+                inPatch[faceIndex] = 0;
+        }
+    }
+
+    m_remeshedPolygons.erase(std::remove_if(m_remeshedPolygons.begin(),
+                                 m_remeshedPolygons.end(),
+                                 [](const std::vector<size_t>& face) { return face.empty(); }),
+        m_remeshedPolygons.end());
+
+    if (applied > 0) {
+        // Dropping the patch interiors leaves vertices nobody refers to any more
+        std::vector<char> used(m_remeshedVertices.size(), 0);
+        for (const auto& face : m_remeshedPolygons)
+            for (const size_t vertex : face)
+                used[vertex] = 1;
+        std::vector<size_t> remap(m_remeshedVertices.size(), 0);
+        std::vector<Vector3> compactedVertices;
+        compactedVertices.reserve(m_remeshedVertices.size());
+        for (size_t vertex = 0; vertex < m_remeshedVertices.size(); ++vertex) {
+            if (!used[vertex])
+                continue;
+            remap[vertex] = compactedVertices.size();
+            compactedVertices.push_back(m_remeshedVertices[vertex]);
+        }
+        for (auto& face : m_remeshedPolygons)
+            for (auto& vertex : face)
+                vertex = remap[vertex];
+        m_remeshedVertices = std::move(compactedVertices);
+        for (auto& vertex : touchedVertices)
+            vertex = remap[vertex];
+        std::sort(touchedVertices.begin(), touchedVertices.end());
+        touchedVertices.erase(std::unique(touchedVertices.begin(), touchedVertices.end()),
+            touchedVertices.end());
+        const std::unordered_set<size_t> seeds(touchedVertices.begin(), touchedVertices.end());
+        smoothAroundVertices(seeds, 3, 5);
+    }
+
+    if (trace)
+        fprintf(stderr, "[patch] applied %zu, even boundaries %zu (no valid quadrangulation %zu, "
+                        "valence floor %zu), odd or oversized %zu, convex loops %zu, "
+                        "concave-targeted growths %zu\n",
+            applied, attempts, geometryRejected, valenceRejected, oddBoundary, convexLoops,
+            concaveGrowth);
+    if (trace)
+        fprintf(stderr, "[patch] quad refusals: edge %zu, reflex %zu, sine %zu, planarity %zu, "
+                        "normal %zu, duplicate %zu\n",
+            rejectEdge, rejectReflex, rejectSine, rejectPlanarity, rejectNormal, rejectDuplicate);
+
+    return applied;
 }
 
 void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
@@ -1525,10 +2876,83 @@ bool QuadExtractor::removeIsolatedFaces()
     MeshSeparator::splitToIslands(m_remeshedPolygons, quadsIslands);
     if (quadsIslands.empty())
         return false;
-    m_remeshedPolygons = *std::max_element(quadsIslands.begin(), quadsIslands.end(), [&](const std::vector<std::vector<size_t>>& first, const std::vector<std::vector<size_t>>& second) {
-        return first.size() < second.size();
-    });
+    if (m_islandAreaFraction <= 0.0) {
+        m_remeshedPolygons = *std::max_element(quadsIslands.begin(), quadsIslands.end(), [&](const std::vector<std::vector<size_t>>& first, const std::vector<std::vector<size_t>>& second) {
+            return first.size() < second.size();
+        });
+        return true;
+    }
+    const auto patchArea = [this](const std::vector<std::vector<size_t>>& patch) {
+        double area = 0.0;
+        for (const auto& face : patch)
+            for (size_t i = 2; i < face.size(); ++i)
+                area += Vector3::area(m_remeshedVertices[face[0]],
+                    m_remeshedVertices[face[i - 1]], m_remeshedVertices[face[i]]);
+        return area;
+    };
+    std::vector<double> areas(quadsIslands.size());
+    double totalArea = 0.0;
+    for (size_t i = 0; i < quadsIslands.size(); ++i) {
+        areas[i] = patchArea(quadsIslands[i]);
+        totalArea += areas[i];
+    }
+    if (!(totalArea > 0.0))
+        return false;
+    std::vector<std::vector<size_t>> kept;
+    for (size_t i = 0; i < quadsIslands.size(); ++i) {
+        if (areas[i] < m_islandAreaFraction * totalArea)
+            continue;
+        for (const auto& face : quadsIslands[i])
+            kept.push_back(face);
+    }
+    if (kept.empty())
+        return false;
+    m_remeshedPolygons = std::move(kept);
     return true;
+}
+
+size_t QuadExtractor::weldKeptPatches()
+{
+    // Patches of one island share their parameterization, so coincident boundary
+    // vertices land on the same quantised position.  Re-index through a hash of
+    // that key, then drop whatever the weld collapsed or duplicated: without
+    // this, keeping the extra patches shows up as edges shared by three faces.
+    std::unordered_map<PositionKey, size_t, PositionKeyHash> canonical;
+    canonical.reserve(m_remeshedVertices.size() * 2);
+    std::vector<Vector3> weldedVertices;
+    weldedVertices.reserve(m_remeshedVertices.size());
+    std::vector<size_t> remap(m_remeshedVertices.size(), 0);
+    for (size_t i = 0; i < m_remeshedVertices.size(); ++i) {
+        const PositionKey key(m_remeshedVertices[i]);
+        auto found = canonical.find(key);
+        if (found != canonical.end()) {
+            remap[i] = found->second;
+            continue;
+        }
+        const size_t index = weldedVertices.size();
+        weldedVertices.push_back(m_remeshedVertices[i]);
+        canonical.emplace(key, index);
+        remap[i] = index;
+    }
+    std::vector<std::vector<size_t>> weldedFaces;
+    weldedFaces.reserve(m_remeshedPolygons.size());
+    std::set<std::vector<size_t>> seen;
+    for (const auto& face : m_remeshedPolygons) {
+        std::vector<size_t> mapped;
+        mapped.reserve(face.size());
+        for (const size_t vertex : face)
+            mapped.push_back(remap[vertex]);
+        std::vector<size_t> sorted(mapped);
+        std::sort(sorted.begin(), sorted.end());
+        if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+            continue;  // the weld collapsed this face
+        if (!seen.insert(sorted).second)
+            continue;  // the other patch already contributed this face
+        weldedFaces.push_back(std::move(mapped));
+    }
+    m_remeshedVertices.swap(weldedVertices);
+    m_remeshedPolygons = std::move(weldedFaces);
+    return m_remeshedPolygons.size();
 }
 
 bool QuadExtractor::removeNonManifoldFaces()
@@ -1649,6 +3073,38 @@ AxisAlignedBoudingBoxTree* QuadExtractor::projectionTree()
     m_projectionTree.reset(new AxisAlignedBoudingBoxTree(&m_projectionBoxes,
         m_projectionIndices, groupBox));
     return m_projectionTree.get();
+}
+
+bool QuadExtractor::projectPointToSource(const Vector3& position, double radius, Vector3* projected)
+{
+    AxisAlignedBoudingBoxTree* tree = projectionTree();
+    if (nullptr == tree || radius <= 0.0)
+        return false;
+    static thread_local std::vector<size_t> candidates;
+    for (double current = radius; current <= radius * 8.0; current *= 2.0) {
+        AxisAlignedBoudingBox queryBox;
+        queryBox.update(::Vector3(position.x() - current, position.y() - current, position.z() - current));
+        queryBox.update(::Vector3(position.x() + current, position.y() + current, position.z() + current));
+        queryBox.updateCenter();
+        candidates.clear();
+        tree->query(queryBox, &candidates);
+        double bestDistance2 = std::numeric_limits<double>::max();
+        bool found = false;
+        for (const size_t triangleIndex : candidates) {
+            const auto& triangle = (*m_triangles)[triangleIndex];
+            const Vector3 candidate = closestPointOnTriangle(position,
+                (*m_vertices)[triangle[0]], (*m_vertices)[triangle[1]], (*m_vertices)[triangle[2]]);
+            const double distance2 = (candidate - position).lengthSquared();
+            if (distance2 < bestDistance2) {
+                bestDistance2 = distance2;
+                *projected = candidate;
+                found = true;
+            }
+        }
+        if (found)
+            return true;
+    }
+    return false;
 }
 
 void QuadExtractor::smoothAndProject(size_t iterations,

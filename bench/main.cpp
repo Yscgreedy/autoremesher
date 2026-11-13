@@ -4,6 +4,8 @@
 #include <AutoRemesher/AutoRemesher>
 #include <AutoRemesher/Vector3>
 
+#include <tbb/task_scheduler_init.h>
+
 #include <windows.h>
 #include <dbghelp.h>
 #include <psapi.h>
@@ -14,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -132,21 +135,80 @@ void traceProgress(void* tag, float progress, const char* status)
         fprintf(stderr, "[trace %.3f] %s\n", progress, status);
 }
 
+const char* g_outputPath = nullptr;
+
+void writeObj(const char* path, const std::vector<AutoRemesher::Vector3>& vertices,
+              const std::vector<std::vector<size_t>>& faces)
+{
+    FILE* fp = fopen(path, "wb");
+    if (nullptr == fp) {
+        fprintf(stderr, "failed to write %s\n", path);
+        return;
+    }
+    for (const auto& vertex : vertices)
+        fprintf(fp, "v %.17g %.17g %.17g\n", vertex.x(), vertex.y(), vertex.z());
+    for (const auto& face : faces) {
+        fputc('f', fp);
+        for (const size_t index : face)
+            fprintf(fp, " %zu", index + 1);
+        fputc('\n', fp);
+    }
+    fclose(fp);
+}
+
 struct Sample {
     double seconds = 0.0;
     size_t quads = 0;
     size_t nonQuads = 0;
     size_t vertices = 0;
+    // A bit exact fingerprint of the result, so two runs (different thread
+    // counts, different builds) can be compared for equality.
+    uint64_t geometryHash = 0;
 };
+
+uint64_t hashBytes(uint64_t hash, const void* data, size_t size)
+{
+    const unsigned char* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+uint64_t hashMesh(const std::vector<AutoRemesher::Vector3>& vertices,
+                  const std::vector<std::vector<size_t>>& faces)
+{
+    uint64_t hash = 1469598103934665603ull;
+    for (const auto& vertex : vertices) {
+        const double coordinates[3] = { vertex.x(), vertex.y(), vertex.z() };
+        hash = hashBytes(hash, coordinates, sizeof(coordinates));
+    }
+    for (const auto& face : faces) {
+        const size_t count = face.size();
+        hash = hashBytes(hash, &count, sizeof(count));
+        hash = hashBytes(hash, face.data(), face.size() * sizeof(size_t));
+    }
+    return hash;
+}
 
 Sample runOnce(const std::vector<AutoRemesher::Vector3>& vertices,
                const std::vector<std::vector<size_t>>& triangles,
                size_t targetTriangleCount, double scaling, double adaptivity,
                double anisotropy, double sharpEdgeDegrees, double smoothNormalDegrees,
+               bool exactTargetQuads, bool absoluteTolerance, double keepIslandFraction,
+               bool weldPatches, bool gradedHoles, bool projectedCaps, bool localRemesh,
                std::vector<std::string>* phaseReport)
 {
     AutoRemesher::AutoRemesher remesher(vertices, triangles);
     remesher.setTargetTriangleCount(targetTriangleCount);
+    remesher.setExactTargetQuads(exactTargetQuads);
+    remesher.setRelativePositionTolerance(!absoluteTolerance);
+    remesher.setIslandAreaFraction(keepIslandFraction);
+    remesher.setWeldPatches(weldPatches);
+    remesher.setGradedHoleFilling(gradedHoles);
+    remesher.setProjectedHoleCaps(projectedCaps);
+    remesher.setLocalRemesh(localRemesh);
     remesher.setScaling(scaling);
     remesher.setGradientAdaptivity(adaptivity);
     remesher.setAnisotropy(anisotropy);
@@ -172,6 +234,9 @@ Sample runOnce(const std::vector<AutoRemesher::Vector3>& vertices,
             ++sample.nonQuads;
     }
     sample.vertices = remesher.remeshedVertices().size();
+    sample.geometryHash = hashMesh(remesher.remeshedVertices(), remesher.remeshedQuads());
+    if (nullptr != g_outputPath)
+        writeObj(g_outputPath, remesher.remeshedVertices(), remesher.remeshedQuads());
     if (nullptr != phaseReport)
         *phaseReport = remesher.phaseReport();
     return sample;
@@ -190,7 +255,15 @@ int main(int argc, char** argv)
     double sharpEdgeDegrees = 60.0;
     double smoothNormalDegrees = 0.0;
     int repeat = 1;
+    int threads = 0;
     bool verbose = false;
+    bool exactTargetQuads = false;
+    bool absoluteTolerance = false;
+    double keepIslandFraction = 0.0;
+    bool weldPatches = false;
+    bool gradedHoles = true;
+    bool projectedCaps = false;
+    bool localRemesh = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -211,11 +284,41 @@ int main(int argc, char** argv)
             smoothNormalDegrees = atof(value());
         else if (arg == "--repeat")
             repeat = atoi(value());
+        else if (arg == "--threads")
+            threads = atoi(value());
         else if (arg == "--verbose")
             verbose = true;
+        else if (arg == "--exact-target-quads")
+            exactTargetQuads = true;
+        else if (arg == "--absolute-tolerance")
+            absoluteTolerance = true;
+        else if (arg == "--keep-island-fraction")
+            keepIslandFraction = atof(value());
+        else if (arg == "--keep-all-islands")
+            keepIslandFraction = 1e-9;
+        else if (arg == "--weld-patches")
+            weldPatches = true;
+        else if (arg == "--graded-holes")
+            gradedHoles = true;
+        else if (arg == "--legacy-holes")
+            gradedHoles = false;
+        else if (arg == "--projected-caps")
+            projectedCaps = true;
+        else if (arg == "--local-remesh")
+            localRemesh = true;
+        else if (arg == "--output") {
+            static std::string outputStorage;
+            outputStorage = value();
+            g_outputPath = outputStorage.c_str();
+        }
     }
+    // One scheduler for the whole run: this is how a thread count is pinned, so
+    // results from different thread counts can be compared for bit equality.
+    std::unique_ptr<tbb::task_scheduler_init> scheduler;
+    if (threads > 0)
+        scheduler.reset(new tbb::task_scheduler_init(threads));
     if (nullptr == input) {
-        fprintf(stderr, "usage: arbench --input model.obj --target-quads N [--repeat N]\n");
+        fprintf(stderr, "usage: arbench --input model.obj --target-quads N [--repeat N] [--threads N] [--exact-target-quads]\n");
         return 1;
     }
 
@@ -234,10 +337,13 @@ int main(int argc, char** argv)
     std::vector<std::string> phaseReport;
     for (int i = 0; i < repeat; ++i) {
         last = runOnce(vertices, triangles, targetQuads * 2, scaling, adaptivity,
-            anisotropy, sharpEdgeDegrees, smoothNormalDegrees, &phaseReport);
+            anisotropy, sharpEdgeDegrees, smoothNormalDegrees, exactTargetQuads,
+            absoluteTolerance, keepIslandFraction, weldPatches, gradedHoles,
+            projectedCaps, localRemesh, &phaseReport);
         times.push_back(last.seconds);
-        printf("run %d: %.3f s  quads %zu  non-quads %zu  vertices %zu\n",
-            i + 1, last.seconds, last.quads, last.nonQuads, last.vertices);
+        printf("run %d: %.3f s  quads %zu  non-quads %zu  vertices %zu  hash %016llx\n",
+            i + 1, last.seconds, last.quads, last.nonQuads, last.vertices,
+            (unsigned long long)last.geometryHash);
         fflush(stdout);
     }
 

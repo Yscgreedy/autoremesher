@@ -34,17 +34,28 @@ public:
     const Vector3& position() const;
     bool operator<(const PositionKey& right) const;
     bool operator==(const PositionKey& right) const;
-    long intX() const { return m_intX; }
-    long intY() const { return m_intY; }
-    long intZ() const { return m_intZ; }
+    long long intX() const { return m_intX; }
+    long long intY() const { return m_intY; }
+    long long intZ() const { return m_intZ; }
+
+    // Quantisation step used to collapse positions that differ only by floating
+    // point noise.  The historical behaviour is an absolute 1e-5, which silently
+    // becomes coarser than the mesh itself once the model is modelled in units
+    // far from 1 (a 1e-3 model would weld its surface into a handful of points).
+    // Callers with an arbitrary model scale set a step relative to their own
+    // voxel size; QuadExtractor does exactly that.  The value is per thread
+    // because mesh islands are extracted in parallel.
+    static void setTolerance(double tolerance);
+    static double tolerance();
 
 private:
-    long m_intX = 0;
-    long m_intY = 0;
-    long m_intZ = 0;
+    long long m_intX = 0;
+    long long m_intY = 0;
+    long long m_intZ = 0;
     Vector3 m_position;
 
-    static long m_toIntFactor;
+    static long long quantize(double value);
+    static thread_local double m_tolerance;
 };
 
 // The quantized integers are the whole identity of a key, so hashing them is
@@ -53,7 +64,7 @@ struct PositionKeyHash {
     size_t operator()(const PositionKey& key) const
     {
         uint64_t hash = 1469598103934665603ull;
-        const long values[3] = { key.intX(), key.intY(), key.intZ() };
+        const long long values[3] = { key.intX(), key.intY(), key.intZ() };
         for (int i = 0; i < 3; ++i) {
             hash ^= (uint64_t)(values[i] + 0x9e3779b97f4a7c15ull);
             hash *= 1099511628211ull;

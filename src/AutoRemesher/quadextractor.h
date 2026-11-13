@@ -77,6 +77,54 @@ public:
         m_progressHandler = std::move(progressHandler);
     }
 
+    // Quantisation step for the cross point weld; 0 keeps the historical fixed
+    // 1e-5.  AutoRemesher passes one relative to the island's voxel size so a
+    // model authored in metres, millimetres and "hundreds of units" all weld at
+    // the same rate instead of the small ones collapsing into themselves.
+    void setPositionTolerance(double tolerance)
+    {
+        m_positionTolerance = tolerance;
+    }
+
+    // Legacy behaviour keeps only the largest edge-connected patch of the
+    // extracted polygons.  A positive fraction keeps every patch whose area is
+    // at least that fraction of the total, then welds coincident vertices and
+    // drops duplicate/degenerate faces so the extra patches do not turn into
+    // non-manifold edges.
+    void setIslandAreaFraction(double fraction)
+    {
+        m_islandAreaFraction = fraction;
+    }
+
+    // Runs the coincident-vertex weld and duplicate-face removal even when only
+    // the largest patch is kept; the cleanup can leave the same face twice.
+    void setWeldPatches(bool weld)
+    {
+        m_weldPatches = weld;
+    }
+
+    // Seals every boundary loop by ear clipping instead of giving up when the
+    // greedy quad pass runs out of score or the loop is longer than 65 vertices.
+    void setGradedHoleFilling(bool graded)
+    {
+        m_gradedHoleFilling = graded;
+    }
+
+    // Large holes (>65 vertices) get a two-ring cap whose apex and mid ring are
+    // projected onto the source surface, instead of being left open.
+    void setProjectedHoleCaps(bool projected)
+    {
+        m_projectedHoleCaps = projected;
+    }
+
+    // Local topology optimisation: merges triangle pairs into quads and splits
+    // the larger faces, judged by one global energy (face size + vertex valence)
+    // instead of the per pass heuristics.
+    void setLocalRemesh(bool enabled)
+    {
+        m_localRemesh = enabled;
+    }
+
     // Per connection of extractedConnections(): 0 untouched, 1 on a triangle whose uv
     // was repaired, 2 added by holdSingularLines(). Drives the [Param] preview color.
     const std::vector<uint8_t>& extractedConnectionMoved() const
@@ -119,7 +167,28 @@ private:
     std::vector<uint8_t> m_extractedConnectionMoved;
     const std::vector<std::vector<Vector2>>* m_originalTriangleUvs = nullptr;
     const std::vector<size_t>* m_singularVertices = nullptr;
+    double m_positionTolerance = 0.0;
+    double m_islandAreaFraction = 0.0;
+    bool m_weldPatches = false;
+    bool m_gradedHoleFilling = false;
+    bool m_projectedHoleCaps = false;
+    bool m_localRemesh = false;
     ProgressHandler m_progressHandler;
+    // Ear clipping over the loop's best fit plane followed by quad pairing; adds
+    // the faces it can and returns how many it added.
+    size_t fillHoleGraded(const std::vector<size_t>& hole);
+    // Snaps a point onto the source mesh (the input surface, which is complete
+    // even where the output has a hole) so cap vertices follow the real surface.
+    bool projectPointToSource(const Vector3& position, double radius, Vector3* projected);
+    // Hill climbs a topology energy with face merges and face splits; returns the
+    // number of operations applied.
+    size_t optimizeLocalTopology(size_t maximumOperations);
+    // Cuts a small disk around a non-quad face, drops its interior vertices and
+    // quadrangulates the boundary loop; returns the number of patches replaced.
+    size_t requadrangulateNonQuadPatches(size_t maximumPatches);
+    // Merges vertices that land on the same quantised position and removes the
+    // faces that collapse or duplicate as a result; returns the face count kept.
+    size_t weldKeptPatches();
     std::unordered_map<std::pair<size_t, size_t>, ConnectionInfo, EdgePairHash> m_connectionInfos;
     // Every cleanup pass ends by pulling its patch back onto the source mesh,
     // and rebuilding the bounding volume tree over that mesh each time was the

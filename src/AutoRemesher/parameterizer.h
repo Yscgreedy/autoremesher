@@ -80,6 +80,12 @@ public:
         m_anisotropy = anisotropy;
     }
 
+    // 0 keeps the historical "scale from the average edge length" behaviour.
+    void setTargetQuadCount(size_t targetQuads)
+    {
+        m_targetQuadCount = targetQuads;
+    }
+
     void setSingularitySimplification(bool simplify)
     {
         m_singularitySimplification = simplify;
@@ -111,6 +117,7 @@ private:
     double m_anisotropy = 1.0;
     double m_maxAspectRatio = 2.3;
     bool m_singularitySimplification = true;
+    size_t m_targetQuadCount = 0;
     size_t m_maximumSingularityPairDistance = 6;
     ProgressHandler m_progressHandler;
 

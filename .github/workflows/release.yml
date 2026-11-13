@@ -64,7 +64,7 @@ jobs:
             -DTBB_BUILD_TBBMALLOC=OFF \
             -DTBB_BUILD_TBBMALLOC_PROXY=OFF \
             -DTBB_BUILD_TESTS=OFF \
-            ${flags[@]}
+            "${flags[@]}"
           cmake --build build/tbb --parallel
           find build/tbb -maxdepth 2 -name 'libtbb*' | head
 
@@ -81,7 +81,7 @@ jobs:
           args=()
           if [ -n "$lib" ]; then args+=("-DAR_TBB_STATIC_LIB=$(pwd)/$lib"); fi
           if [ "$RUNNER_OS" = "Linux" ]; then args+=('-DCMAKE_CXX_FLAGS=-fpermissive -w'); fi
-          cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release ${args[@]}
+          cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release "${args[@]}"
 
       - name: Build the CLI
         run: cmake --build build/cli --config Release --parallel

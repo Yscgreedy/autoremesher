@@ -1,0 +1,12 @@
+{
+  "r4_output_counts": {
+    "cover": 4,
+    "extract": 67,
+    "field": 1,
+    "param": 7,
+    "pipeline": 13
+  },
+  "r8_exempt_files": {
+    "src/core/extract/quadextractor.cpp": 6392
+  }
+}

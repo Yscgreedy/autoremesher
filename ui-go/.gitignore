@@ -1,0 +1,11 @@
+# 仓库根的 .gitignore 有 Fortran 的 *.mod，会连 go.mod 一起忽略；显式取回
+!go.mod
+!go.sum
+
+# 构建产物：不要提交（go build ./... 会在包目录留下 ui.exe）
+bin/
+ui.exe
+ui-go.exe
+*.exe
+*.test
+*.out

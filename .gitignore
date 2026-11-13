@@ -56,3 +56,8 @@ gui/dist/
 
 # Local agent worktrees and scratch research
 .agents/
+
+# Go module files. The Fortran rule above (*.mod) otherwise hides gui/go.mod,
+# which left the Go GUI unbuildable from a fresh clone.
+!gui/go.mod
+!gui/go.sum

@@ -4,9 +4,29 @@
 > 分支事实：`merge-base` = `4a49f82f`；master 在其后有 6 个提交，arch-refactor 只有 1 个（`0ba6c98d`，wip 快照）。
 > 配套调研：[docs/merge/01-frontend-and-cli.md](merge/01-frontend-and-cli.md)（前端与 CLI，283 行）、[docs/merge/02-tools-and-gates.md](merge/02-tools-and-gates.md)（工具与门禁，601 行）。
 
----
+## 0. 进展（2026-11-13 收尾快照）
 
-## 0. 结论摘要（先看这六条）
+| 阶段 | 状态 | 落地内容 | 证据 |
+| --- | --- | --- | --- |
+| S1 核心分层 | **已完成** | 29 文件 100% 相似度搬入 `src/core/<8 层>`、17 个转发头重指、生成式源清单、分层门 | PR #1（`7d73df65`）；`body_vox`/`body_clean` 逐字节不变 |
+| S2 门禁 | **已完成** | `check_boundaries.py` 补到 R1–R8（R4/R8 为 ratchet）+ 基线文件；`gen_sources --check`；CI 三道门（structure / go / build）+ metrics 自检 | PR #2、PR #3；master 上 `gates` 绿 |
+| S2 度量工具 | **已完成** | `tools/metrics/**`（与 arch 侧逐字节一致）、README 补依赖/PYTHONUTF8/输入约定 | `test_metrics.py` 60/60 |
+| S3 文档/前端 | **部分完成** | `gui/` 作业历史上限 + 路径白名单工具函数；`release.yml` 重写为 CMake+Go 三平台打包；本文档状态更新 | `go test ./...` 全绿；release dispatch：windows/macos 通过，Linux 见下 |
+| S4 锚点 | **已完成** | [REGRESSION-ANCHORS.md](REGRESSION-ANCHORS.md) + [regression-anchors.json](regression-anchors.json)：三用例 ×5 次 | `body_*` 5/5 稳定，`head_in` 2 个 sha（结构稳定） |
+
+**刻意没做的（有理由，不是遗漏）**
+
+| 项 | 状态 | 原因 |
+| --- | --- | --- |
+| R4 的 92 处库内输出 | 保持 ratchet | 要「清零」得先定日志体系（回调 vs 返回错误码），是一次独立重构；ratchet 先保证不再增长 |
+| 全树 clang-format | 保持「只查改动文件」 | 没有任何 clang-format 版本能复现现有格式（18/19/20/21 实测都要改 2–3 个样本文件）；全树重排是独立提交 |
+| `docs/ARCHITECTURE-REFACTOR-PLAN.md` 原文引入 | 未引入 | 它的 §1.1/§1.2 描述的是 arch 侧状态（`ui-go/`、`legacy/gui-qt/`、8101 quads 锚点），直接搬进来会带进一批已失效的数字；要点已并入本文与 `REGRESSION-ANCHORS.md` |
+| `emit_comparison.py` 实测 | 未实测 | 需要 `artifacts/{baseline,after}` 整批采集（140 MB，未入库）；只按源码核对了输入契约并写进 `tools/metrics/README.md` §8 |
+| `go test -race` | 未接入 | 本机无 gcc（`-race` 需 cgo）；可在 ubuntu runner 上另开一步 |
+| Linux 发布包 | 未通过 | vendored TBB 2017 在 GCC 15 上要 `-fpermissive`（已加），但 Linux 作业仍失败，见 issue/日志 |
+
+---
+## 0.1 结论摘要（先看这六条）
 
 1. **两条分支做的是同一次架构手术的两个不同解**：master 走「彻底删 Qt + 手写 C++ CLI + Go GUI」；arch 走「把 Qt 冻结到 `legacy/gui-qt/` + 自建 CLI + 自建 Go 前端 `ui-go/`」，另外**额外**做了 `src/AutoRemesher/* → src/core/<8 层>/` 的分层搬迁 + 生成式源清单 + 边界门 + 度量工具。真正值得合入的，只有 arch 的**目录分层 + 工具/门禁 + 计划文档**这三块。
 2. **不要执行 `git merge arch-refactor`**。实测冲突 67 个路径，其中 58 个（87%）来自「master 删了 Qt，arch 把同一批文件改名到 legacy/gui-qt」的 rename/delete 冲突——直接合并会把这 58 个 Qt 文件重新"复活"回工作树，与 master 的路线正面冲突。剩 9 个是 `src/core/{double.h, positionkey.cpp, quadparameterizer.cpp, quadextractor.cpp, quadextractor.h, singularitysimplifier.cpp, autoremesher.cpp, autoremesher.h}` 的内容冲突 + `CMakeLists.txt` 的 add/add。

@@ -28,6 +28,8 @@ func main() {
 	port := flag.Int("port", 0, "listen port (0 picks a free port)")
 	addr := flag.String("addr", "127.0.0.1", "loopback address to bind")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	maxJobs := flag.Int("max-jobs", job.DefaultMaxJobs,
+		"how many finished jobs to keep in memory; the oldest finished job is dropped (with its output file) beyond that")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "autoremesher-gui %s\n\nusage: autoremesher-gui [flags]\n\n", appVersion)
 		flag.PrintDefaults()
@@ -38,15 +40,18 @@ func main() {
 		fmt.Printf("autoremesher-gui %s (%s/%s)\n", appVersion, runtime.GOOS, runtime.GOARCH)
 		return
 	}
-	if err := run(*cliFlag, *noOpen, *port, *addr); err != nil {
+	if err := run(*cliFlag, *noOpen, *port, *addr, *maxJobs); err != nil {
 		fmt.Fprintln(os.Stderr, "autoremesher-gui:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cliFlag string, noOpen bool, port int, addr string) error {
+func run(cliFlag string, noOpen bool, port int, addr string, maxJobs int) error {
 	if port < 0 || port > 65535 {
 		return fmt.Errorf("--port must be between 0 and 65535 (got %d)", port)
+	}
+	if maxJobs < 1 {
+		return fmt.Errorf("--max-jobs must be at least 1 (got %d)", maxJobs)
 	}
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
@@ -62,6 +67,7 @@ func run(cliFlag string, noOpen bool, port int, addr string) error {
 	}
 	cliInfo := job.Discover(cliFlag)
 	mgr := job.NewManager(cliInfo, ws)
+	mgr.SetMaxJobs(maxJobs)
 	defer func() { _ = mgr.Close() }()
 
 	token, err := server.NewToken()
@@ -97,6 +103,7 @@ func run(cliFlag string, noOpen bool, port int, addr string) error {
 		fmt.Println("  cli   NOT FOUND — pass --cli PATH to the headless autoremesher")
 	}
 	fmt.Printf("  work  %s\n", ws.Dir())
+	fmt.Printf("  jobs  keep at most %d finished jobs\n", mgr.MaxJobs())
 	fmt.Println("  stop  Ctrl+C")
 
 	httpSrv := &http.Server{

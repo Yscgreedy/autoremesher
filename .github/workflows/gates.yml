@@ -74,3 +74,18 @@ jobs:
       - name: Smoke test
         shell: cmd
         run: build\cli\dist\autoremesher.exe --version
+
+  metrics:
+    name: metrics (toolkit self-tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the toolkit dependency
+        # numpy is the only third-party import (mesh_metrics.py); emit_comparison
+        # is standard library only.  Pinned so the self-tests do not drift.
+        run: pip install "numpy==2.3.5"
+      - name: Self-tests
+        run: PYTHONUTF8=1 python tools/metrics/test_metrics.py

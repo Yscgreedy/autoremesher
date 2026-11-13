@@ -280,3 +280,145 @@ func TestDecodeParamsAppliesDefaults(t *testing.T) {
 		t.Fatalf("string coercion failed: %+v", p2)
 	}
 }
+
+// runOneJob starts one job and waits until it reaches a terminal state.
+func runOneJob(t *testing.T, m *Manager, inputID string) *Job {
+	t.Helper()
+	j, err := m.Start(baseParams(inputID))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-j.Done():
+	case <-time.After(60 * time.Second):
+		t.Fatalf("job %s did not finish", j.ID())
+	}
+	if snap := j.Snapshot(); snap.State != StateDone {
+		t.Fatalf("job %s state = %s (%s), want done", j.ID(), snap.State, snap.Error)
+	}
+	return j
+}
+
+func retainedJobs(m *Manager) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.jobs)
+}
+
+func retainedEvents(j *Job) int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return len(j.history)
+}
+
+func TestManagerRetentionCap(t *testing.T) {
+	m, ws := newTestManager(t, nil)
+	in, err := ws.Save("cube.obj", strings.NewReader(tinyOBJ))
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := m.MaxJobs(); got != DefaultMaxJobs {
+		t.Fatalf("default cap = %d, want %d", got, DefaultMaxJobs)
+	}
+	m.SetMaxJobs(2)
+
+	var jobs []*Job
+	for i := 0; i < 3; i++ {
+		jobs = append(jobs, runOneJob(t, m, in.ID))
+	}
+
+	if got := retainedJobs(m); got != 2 {
+		t.Fatalf("retained %d jobs, want 2", got)
+	}
+	if m.Get(jobs[0].ID()) != nil {
+		t.Fatal("the oldest finished job should have been evicted")
+	}
+	for _, keep := range jobs[1:] {
+		if m.Get(keep.ID()) == nil {
+			t.Fatalf("job %s was evicted but should have been kept", keep.ID())
+		}
+	}
+
+	// Eviction must release both halves of the memory: the retained events and
+	// the result file inside the workspace.
+	if n := retainedEvents(jobs[0]); n != 0 {
+		t.Fatalf("evicted job still retains %d events", n)
+	}
+	if _, err := os.Stat(jobs[0].OutputPath()); !os.IsNotExist(err) {
+		t.Fatalf("evicted job left its output behind (stat err = %v)", err)
+	}
+	if _, err := os.Stat(jobs[2].OutputPath()); err != nil {
+		t.Fatalf("surviving job lost its output: %v", err)
+	}
+}
+
+func TestManagerNeverEvictsRunningJob(t *testing.T) {
+	env := append(os.Environ(), "FAKE_DELAY_MS=400")
+	m, ws := newTestManager(t, env)
+	in, err := ws.Save("cube.obj", strings.NewReader(tinyOBJ))
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	m.SetMaxJobs(1)
+
+	finished := runOneJob(t, m, in.ID)
+	running, err := m.Start(baseParams(in.ID))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// The cap is exceeded by exactly one job, and the only candidate is the
+	// finished one.
+	if m.Get(finished.ID()) != nil {
+		t.Fatal("the finished job should have been evicted to make room")
+	}
+	if m.Get(running.ID()) == nil {
+		t.Fatal("the running job must never be evicted")
+	}
+
+	_ = running.Cancel()
+	select {
+	case <-running.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("running job did not stop")
+	}
+}
+
+func TestPruneLockedKeepsRunningJobs(t *testing.T) {
+	m := &Manager{
+		jobs:    map[string]*Job{},
+		maxJobs: 1,
+		clock:   time.Now,
+	}
+	p := DefaultParams()
+	for _, id := range []string{"a", "b", "c"} {
+		m.jobs[id] = newJob(id, p, "/in.obj", "/out.obj", []string{"autoremesher"}, time.Now)
+		m.order = append(m.order, id)
+	}
+
+	if victims := m.pruneLocked(); len(victims) != 0 {
+		t.Fatalf("evicted %d running jobs, want 0", len(victims))
+	}
+	if len(m.jobs) != 3 || len(m.order) != 3 {
+		t.Fatalf("running jobs were dropped: jobs=%d order=%d", len(m.jobs), len(m.order))
+	}
+
+	// A finished job becomes a candidate; an id whose job is already gone is
+	// forgotten instead of counting against the cap forever.
+	m.jobs["b"].finish(StateDone, "")
+	m.order = append([]string{"stale"}, m.order...)
+	victims := m.pruneLocked()
+	if len(victims) != 1 || victims[0].ID() != "b" {
+		t.Fatalf("victims = %v, want exactly b", victims)
+	}
+	if _, ok := m.jobs["b"]; ok {
+		t.Fatal("job b should have been deleted from the map")
+	}
+	if len(m.order) != 2 {
+		t.Fatalf("order = %v, want the two running jobs", m.order)
+	}
+	for _, id := range m.order {
+		if id == "stale" {
+			t.Fatal("stale id was not forgotten")
+		}
+	}
+}

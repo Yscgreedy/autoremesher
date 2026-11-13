@@ -1,0 +1,76 @@
+{
+  "binary": "build/cli/dist/autoremesher.exe (Release)",
+  "cases": {
+    "body_clean": {
+      "bytes": [
+        890888,
+        890888,
+        890888,
+        890888,
+        890888
+      ],
+      "distinct_sha": 1,
+      "faces": 10205,
+      "flags": "--target-quads 15000 --sharp-edge 60 --adaptivity 0.3 --anisotropy 1",
+      "input": "body_clean.obj",
+      "input_sha256": "6df100080ef8f8627ca9b4d64dc8f8e62fc47cb27664a3397453676689875a63",
+      "mode_hits": 5,
+      "mode_sha256": "876092b1e07d76814683c9d688b18c8e9b9772e64f8b433a8957f77168f5aa45",
+      "non_quads": 74,
+      "quads": 10131,
+      "runs": 5,
+      "sha256_values": [
+        "876092b1e07d76814683c9d688b18c8e9b9772e64f8b433a8957f77168f5aa45"
+      ],
+      "stable_bytes": true
+    },
+    "body_vox": {
+      "bytes": [
+        701942,
+        701942,
+        701942,
+        701942,
+        701942
+      ],
+      "distinct_sha": 1,
+      "faces": 8053,
+      "flags": "--target-quads 15000 --sharp-edge 60 --adaptivity 0.3",
+      "input": "body_vox.obj",
+      "input_sha256": "8f04aa7772ade54f8d7cc66df97dc28469e64ef33c9dc1fb7529937bcb065e75",
+      "mode_hits": 5,
+      "mode_sha256": "898e2881a6ac1a1ef07ee965d63ca526fa2f4769d56353bf7e45f5a90834187d",
+      "non_quads": 92,
+      "quads": 7961,
+      "runs": 5,
+      "sha256_values": [
+        "898e2881a6ac1a1ef07ee965d63ca526fa2f4769d56353bf7e45f5a90834187d"
+      ],
+      "stable_bytes": true
+    },
+    "head_in": {
+      "bytes": [
+        455748,
+        455750,
+        455750,
+        455750,
+        455748
+      ],
+      "distinct_sha": 2,
+      "faces": 5107,
+      "flags": "--target-quads 10000 --sharp-edge 60 --adaptivity 0.5 --anisotropy 1",
+      "input": "head_in.obj",
+      "input_sha256": "86684c0ccbf8a576cdabd1c4d5032cb3668f151473280f0a72299f40945c470f",
+      "mode_hits": 3,
+      "mode_sha256": "bf0a28677bc1c89b754f84cca96e5bf79068010969df8da0ed5696dced5ead30",
+      "non_quads": 389,
+      "quads": 4718,
+      "runs": 5,
+      "sha256_values": [
+        "138bfb39247faf8bbf9b91ec85d94f44fa02d8a79a5d4f435d5522392a1061c1",
+        "bf0a28677bc1c89b754f84cca96e5bf79068010969df8da0ed5696dced5ead30"
+      ],
+      "stable_bytes": false
+    }
+  },
+  "input_dir": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\remesh"
+}

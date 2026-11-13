@@ -1,0 +1,97 @@
+{
+  "file": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\remesh\\head_clean.obj",
+  "tool": "mesh_metrics",
+  "version": 1,
+  "bytes": 28965295,
+  "parse_seconds": 0.685,
+  "objects": 1,
+  "vertices": 199731,
+  "faces": 399708,
+  "warnings": [
+    "faces contain v/vt/vn references; only the vertex index is used"
+  ],
+  "quads": 0,
+  "tri_faces": 399708,
+  "ngon_faces": 0,
+  "non_quad_faces": 399708,
+  "quad_ratio": 0.0,
+  "quad_ratio_pct": 0.0,
+  "face_size_histogram": {
+    "3": 399708
+  },
+  "used_vertices": 199731,
+  "unreferenced_vertices": 0,
+  "bbox": {
+    "min": [
+      -0.431679,
+      -0.446091,
+      -0.313987
+    ],
+    "max": [
+      0.418968,
+      0.41787,
+      0.297272
+    ],
+    "size": [
+      0.8506469999999999,
+      0.863961,
+      0.611259
+    ],
+    "diagonal": 1.3578168113596913
+  },
+  "area_total": 2.5059742871018345,
+  "area_by_diag2": 1.3592340568805015,
+  "edges_unique": 599562,
+  "edges_boundary": 4,
+  "edges_interior": 599555,
+  "edges_non_manifold": 3,
+  "edge_multiplicity_max": 4,
+  "edge_length": {
+    "min": 0.00016447796204962988,
+    "p05": 0.0014967833677588668,
+    "median": 0.003635142982050625,
+    "mean": 0.004121835919114009,
+    "p95": 0.00838653021814376,
+    "max": 0.028074969296510374,
+    "std": 0.002195634483300959
+  },
+  "edge_length_median_by_diag": 0.002677196917609573,
+  "valence_histogram": {
+    "2": 2,
+    "3": 4081,
+    "4": 22245,
+    "5": 47428,
+    "6": 58600,
+    "7": 40443,
+    "8": 18957,
+    "9": 5947,
+    "10": 1562,
+    "11": 370,
+    "12": 71,
+    "13": 18,
+    "14": 4,
+    "15": 3
+  },
+  "valence_mean": 6.003694969734292,
+  "valence_max": 15,
+  "valence4_ratio": 0.11137479910479595,
+  "irregular_vertices": 177486,
+  "normal_inconsistent_edges": 7676,
+  "normal_inconsistent_ratio": 0.01280267928921446,
+  "max_dihedral_deg": 179.99428131640647,
+  "components": 1,
+  "components_largest_face_ratio": 1.0,
+  "components_top2_face_ratio": 1.0,
+  "components_top3_face_ratio": 1.0,
+  "components_face_histogram": [
+    399708
+  ],
+  "components_small_face_count": 0,
+  "boundary_loops": 2,
+  "boundary_vertices": 6,
+  "degenerate_faces": 0,
+  "degenerate_ratio": 0.0,
+  "triangles_after_fan": 399708,
+  "compute_seconds": 0.522,
+  "total_seconds": 1.227
+}

@@ -1,0 +1,139 @@
+{
+  "file": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\out\\head_quad_10k.obj",
+  "tool": "mesh_metrics",
+  "version": 1,
+  "bytes": 288057,
+  "parse_seconds": 0.007,
+  "objects": 0,
+  "vertices": 5357,
+  "faces": 5142,
+  "warnings": [],
+  "quads": 4810,
+  "tri_faces": 99,
+  "ngon_faces": 233,
+  "non_quad_faces": 332,
+  "quad_ratio": 0.9354336833916764,
+  "quad_ratio_pct": 93.54336833916764,
+  "face_size_histogram": {
+    "3": 99,
+    "4": 4810,
+    "5": 233
+  },
+  "used_vertices": 5357,
+  "unreferenced_vertices": 0,
+  "bbox": {
+    "min": [
+      -0.4241,
+      -0.444748,
+      -0.298493
+    ],
+    "max": [
+      0.416707,
+      0.413348,
+      0.286763
+    ],
+    "size": [
+      0.840807,
+      0.858096,
+      0.585256
+    ],
+    "diagonal": 1.3363419255568538
+  },
+  "area_total": 1.9114158739318743,
+  "area_by_diag2": 1.0703356740512193,
+  "edges_unique": 10378,
+  "edges_boundary": 178,
+  "edges_interior": 10076,
+  "edges_non_manifold": 124,
+  "edge_multiplicity_max": 3,
+  "edge_length": {
+    "min": 0.0,
+    "p05": 0.0009440154998947634,
+    "median": 0.017164393852186696,
+    "mean": 0.017757707666739703,
+    "p95": 0.0352022742256095,
+    "max": 0.0698656079701594,
+    "std": 0.010664890544155724
+  },
+  "edge_length_median_by_diag": 0.012844312914177479,
+  "valence_histogram": {
+    "2": 334,
+    "3": 743,
+    "4": 3703,
+    "5": 458,
+    "6": 88,
+    "7": 23,
+    "8": 5,
+    "9": 2,
+    "10": 1
+  },
+  "valence_mean": 3.8745566548441293,
+  "valence_max": 10,
+  "valence4_ratio": 0.6912450998693298,
+  "irregular_vertices": 1654,
+  "normal_inconsistent_edges": 1049,
+  "normal_inconsistent_ratio": 0.10107920601271922,
+  "max_dihedral_deg": 180.0,
+  "components": 70,
+  "components_largest_face_ratio": 0.9527421236872812,
+  "components_top2_face_ratio": 0.9556592765460911,
+  "components_top3_face_ratio": 0.9577985219758849,
+  "components_face_histogram": [
+    4899,
+    15,
+    11,
+    10,
+    8,
+    8,
+    7,
+    7,
+    7,
+    7
+  ],
+  "components_small_face_count": 48,
+  "boundary_loops": 5,
+  "boundary_vertices": 178,
+  "degenerate_faces": 22,
+  "degenerate_ratio": 0.004278490859587709,
+  "triangles_after_fan": 10418,
+  "compute_seconds": 0.028,
+  "ref": {
+    "file": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\remesh\\head_clean.obj",
+    "ref_stats": {
+      "vertices": 199731,
+      "faces": 399708,
+      "triangles": 399708,
+      "avg_edge": 0.004121835919114009,
+      "median_edge": 0.003635142982050625,
+      "cell_size": 0.008243671838228018
+    },
+    "deviation": {
+      "samples": 5357,
+      "total_points": 5357,
+      "subsampled": false,
+      "unresolved": 0,
+      "mean": 0.0010767126063347678,
+      "p50": 0.0008050879252582908,
+      "p95": 0.0029496535995059033,
+      "max": 0.011937914811007717,
+      "mean_rel": 0.0008057164006779939,
+      "p95_rel": 0.0022072596414849308,
+      "max_rel": 0.008933278663717136
+    },
+    "deviation_seconds": 1.937,
+    "coverage": {
+      "samples": 199670,
+      "total_points": 199731,
+      "subsampled": false,
+      "threshold": 0.004121835919114009,
+      "covered_ratio": 0.6096809736064507,
+      "unresolved": 61,
+      "ref_dev_mean": 0.005369423564805874,
+      "ref_dev_p95": 0.01909452043472708,
+      "ref_dev_max": 0.07739137848587309
+    },
+    "coverage_seconds": 17.37,
+    "total_seconds": 19.676
+  },
+  "total_seconds": 20.412
+}

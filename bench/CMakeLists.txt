@@ -12,7 +12,12 @@ endif()
 set(TBB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/tbb")
 set(TBB_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../build/tbb/tbb_static.lib")
 
-file(GLOB CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../src/AutoRemesher/*.cpp")
+# Same generated manifest as the main build (cmake/core_sources.cmake).
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/core_sources.cmake")
+set(CORE_SRC "")
+foreach(_ar_src IN LISTS AUTOREMESHER_CORE_MODULE_SOURCES)
+    list(APPEND CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../${_ar_src}")
+endforeach()
 file(GLOB ISOTROPIC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/isotropicremesher/*.cpp")
 file(GLOB MESHOPT_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/meshoptimizer/src/*.cpp")
 

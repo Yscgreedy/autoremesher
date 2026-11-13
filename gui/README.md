@@ -39,6 +39,7 @@ autoremesher-gui.exe --cli ..\dist\autoremesher.exe
 | `--port N` | `0` | listen port, `0` picks a free one |
 | `--addr IP` | `127.0.0.1` | bind address; loopback only, anything else is rejected |
 | `--no-open` | off | do not open the browser |
+| `--max-jobs N` | `32` | finished jobs kept in memory; beyond that the oldest finished job is dropped, together with its result file. A running job is never dropped, so the live count can briefly exceed N |
 | `--version` | | print the GUI version and exit |
 
 The console prints the session URL, which contains a random token:
@@ -151,9 +152,12 @@ go test ./internal/server -run TestConflictAndCancel -v
 `internal/job` covers the JSON-lines parser and the 25/s progress throttle
 (`stream_test.go`) and the full manager lifecycle against the fake CLI
 (`manager_test.go`: happy path, busy rejection, cancel, error path, validation,
-argv construction). `internal/server` covers token rejection, static page
-delivery, upload → run → SSE → model, 409 on a concurrent run, cancel and
-validation errors.
+argv construction, and the retention cap — the oldest finished job is evicted
+with its events and its result file, while a running job is never dropped).
+`internal/server` covers token rejection, static page delivery, upload → run →
+SSE → model, 409 on a concurrent run, cancel and validation errors, plus the
+path containment helpers in `paths_test.go` that a future read-only file
+browser would use.
 
 ## End-to-end smoke test (no Qt, no C++ needed)
 

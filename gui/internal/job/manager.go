@@ -35,6 +35,11 @@ const (
 	scanBuffer = 1 << 20
 )
 
+// DefaultMaxJobs is how many finished jobs the manager keeps in memory. Every
+// retained job also retains up to MaxLogTail events, so an unbounded map is an
+// unbounded leak in a long-lived session. --max-jobs overrides it.
+const DefaultMaxJobs = 32
+
 // Result mirrors the CLI "result" event.
 type Result struct {
 	Output    string  `json:"output"`
@@ -279,6 +284,16 @@ func (j *Job) setCmd(cmd *exec.Cmd) {
 	j.mu.Unlock()
 }
 
+// release drops the retained event history of a job that left the manager. It
+// is the memory half of eviction: the Job object can still be read by a handler
+// that holds it, but it no longer pins up to MaxLogTail events.
+func (j *Job) release() {
+	j.mu.Lock()
+	j.history = nil
+	j.subs = map[chan Event]struct{}{}
+	j.mu.Unlock()
+}
+
 // Manager owns the CLI discovery, the temp workspace and at most one running job.
 type Manager struct {
 	mu      sync.Mutex
@@ -286,17 +301,21 @@ type Manager struct {
 	ws      *Workspace
 	env     []string
 	jobs    map[string]*Job
+	order   []string // job ids in creation order, used by the retention cap
 	current *Job
 	clock   func() time.Time
+	maxJobs int
 }
 
 // NewManager builds a manager over an existing workspace.
 func NewManager(cli CLIInfo, ws *Workspace) *Manager {
 	return &Manager{
-		cli:   cli,
-		ws:    ws,
-		jobs:  map[string]*Job{},
-		clock: time.Now,
+		cli:     cli,
+		ws:      ws,
+		jobs:    map[string]*Job{},
+		order:   []string{},
+		maxJobs: DefaultMaxJobs,
+		clock:   time.Now,
 	}
 }
 
@@ -340,6 +359,77 @@ func (m *Manager) SetClock(clock func() time.Time) {
 	m.mu.Unlock()
 }
 
+// MaxJobs reports the retention cap.
+func (m *Manager) MaxJobs() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.maxJobs
+}
+
+// SetMaxJobs changes the retention cap and prunes immediately. A value below 1
+// falls back to DefaultMaxJobs. Running jobs are never dropped, so the live
+// count can briefly exceed the cap while a run is in flight.
+func (m *Manager) SetMaxJobs(n int) {
+	if n < 1 {
+		n = DefaultMaxJobs
+	}
+	m.mu.Lock()
+	m.maxJobs = n
+	victims := m.pruneLocked()
+	m.mu.Unlock()
+	m.evict(victims)
+}
+
+// pruneLocked drops the oldest finished jobs until the retained count fits the
+// cap. A job that is still running is never a candidate, and an id whose job is
+// already gone is forgotten instead of counted. The caller holds m.mu and must
+// run evict on the result after unlocking, because freeing a job touches the
+// filesystem.
+func (m *Manager) pruneLocked() []*Job {
+	var victims []*Job
+	limit := m.maxJobs
+	if limit < 1 {
+		limit = DefaultMaxJobs
+	}
+	for len(m.order) > limit {
+		idx := -1
+		for i, id := range m.order {
+			j := m.jobs[id]
+			if j == nil || !j.isRunning() {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return victims // every retained job is still running
+		}
+		id := m.order[idx]
+		m.order = append(m.order[:idx], m.order[idx+1:]...)
+		j := m.jobs[id]
+		if j == nil {
+			continue
+		}
+		delete(m.jobs, id)
+		if m.current == j {
+			m.current = nil
+		}
+		victims = append(victims, j)
+	}
+	return victims
+}
+
+// evict releases the memory an evicted job held and removes its result file
+// through the workspace, the same path Close uses. Errors are ignored on
+// purpose: the file may already be gone, and eviction must never fail a request.
+func (m *Manager) evict(victims []*Job) {
+	for _, v := range victims {
+		v.release()
+		if m.ws != nil {
+			_ = m.ws.RemoveOutput(v.ID())
+		}
+	}
+}
+
 // Get returns a job by id.
 func (m *Manager) Get(id string) *Job {
 	m.mu.Lock()
@@ -365,11 +455,12 @@ func (m *Manager) Start(p Params) (*Job, error) {
 		return nil, ErrUnknownInput
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.current != nil && m.current.isRunning() {
+		m.mu.Unlock()
 		return nil, ErrBusy
 	}
 	if !m.cli.Found {
+		m.mu.Unlock()
 		return nil, ErrNoCLI
 	}
 	id := NewID()
@@ -377,7 +468,14 @@ func (m *Manager) Start(p Params) (*Job, error) {
 	cmdline := append([]string{m.cli.Path}, p.Args(in.Path, out)...)
 	j := newJob(id, p, in.Path, out, cmdline, m.clock)
 	m.jobs[id] = j
+	m.order = append(m.order, id)
 	m.current = j
+	victims := m.pruneLocked()
+	m.mu.Unlock()
+
+	// Freeing a victim touches the filesystem, so it happens outside the lock
+	// and before the new job starts producing events.
+	m.evict(victims)
 	go m.run(j)
 	return j, nil
 }

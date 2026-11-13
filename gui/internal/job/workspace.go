@@ -91,6 +91,16 @@ func (w *Workspace) OutputPath(jobID string) string {
 	return filepath.Join(w.dir, "out-"+jobID+".obj")
 }
 
+// RemoveOutput deletes the result OBJ of one job. It is the workspace-side
+// cleanup used when a finished job is evicted; a missing file is not an error,
+// because a failed or cancelled job never produced one.
+func (w *Workspace) RemoveOutput(jobID string) error {
+	if err := os.Remove(w.OutputPath(jobID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove output: %w", err)
+	}
+	return nil
+}
+
 // Close removes the workspace tree.
 func (w *Workspace) Close() error {
 	return os.RemoveAll(w.dir)

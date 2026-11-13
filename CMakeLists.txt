@@ -1,0 +1,104 @@
+cmake_minimum_required(VERSION 3.20)
+project(AutoRemesher VERSION 1.2.0 LANGUAGES CXX)
+
+# Qt is not part of this build.  The core library is plain C++14.  The only
+# executables are the headless CLI defined here and the Go GUI in gui/, which is
+# built by the Go toolchain and drives the CLI as a subprocess.
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+option(AR_BUILD_TESTS "Register the CLI smoke test" OFF)
+
+# ------------------------------------------------------------------ dependencies
+set(AR_TBB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/tbb" CACHE PATH "TBB headers")
+set(AR_TBB_STATIC_LIB "${CMAKE_CURRENT_SOURCE_DIR}/build/tbb/tbb_static.lib" CACHE FILEPATH
+    "Static TBB built by build/build_tbb.bat (empty to use a system TBB)")
+
+find_path(AR_TBB_INCLUDE_DIR
+    NAMES tbb/blocked_range.h oneapi/tbb/blocked_range.h
+    HINTS "${AR_TBB_ROOT}/include"
+    DOC "Directory that contains the TBB headers")
+if(NOT AR_TBB_INCLUDE_DIR)
+    message(FATAL_ERROR "TBB headers not found. Run build/build_tbb.bat first, or set AR_TBB_INCLUDE_DIR.")
+endif()
+
+if(AR_TBB_STATIC_LIB AND EXISTS "${AR_TBB_STATIC_LIB}")
+    add_library(ar_tbb STATIC IMPORTED)
+    set_target_properties(ar_tbb PROPERTIES IMPORTED_LOCATION "${AR_TBB_STATIC_LIB}")
+else()
+    find_package(TBB QUIET)
+    if(NOT TBB_FOUND)
+        message(FATAL_ERROR
+            "No TBB found. Build the vendored copy with build/build_tbb.bat "
+            "(expected ${AR_TBB_STATIC_LIB}) or install oneAPI TBB.")
+    endif()
+endif()
+
+# ------------------------------------------------------------------ core library
+file(GLOB AR_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/AutoRemesher/*.cpp")
+file(GLOB AR_ISOTROPIC_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/isotropicremesher/*.cpp")
+file(GLOB AR_MESHOPTIMIZER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/meshoptimizer/src/*.cpp")
+
+add_library(autoremesher_core STATIC
+    ${AR_CORE_SOURCES}
+    ${AR_ISOTROPIC_SOURCES}
+    ${AR_MESHOPTIMIZER_SOURCES}
+)
+target_include_directories(autoremesher_core PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/eigen"
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/meshoptimizer/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/isotropicremesher"
+    "${AR_TBB_INCLUDE_DIR}"
+)
+target_compile_definitions(autoremesher_core PUBLIC NOMINMAX _USE_MATH_DEFINES __TBB_NO_IMPLICIT_LINKAGE=1)
+if(TARGET ar_tbb)
+    target_link_libraries(autoremesher_core PUBLIC ar_tbb)
+else()
+    target_link_libraries(autoremesher_core PUBLIC TBB::tbb)
+endif()
+
+if(MSVC)
+    # Eigen sized translation units need the big object format; /GL and /LTCG
+    # are release-only because they make the debug link extremely slow.
+    target_compile_options(autoremesher_core PUBLIC /bigobj /utf-8)
+    target_compile_options(autoremesher_core PRIVATE $<$<CONFIG:Release>:/O2 /fp:fast /GL>)
+    target_link_options(autoremesher_core PUBLIC $<$<CONFIG:Release>:/LTCG>)
+    set_property(TARGET autoremesher_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
+# ----------------------------------------------------------------------- the CLI
+add_executable(autoremesher "${CMAKE_CURRENT_SOURCE_DIR}/src/cli/main.cpp")
+target_link_libraries(autoremesher PRIVATE autoremesher_core)
+target_compile_definitions(autoremesher PRIVATE
+    AR_VERSION="${PROJECT_VERSION}"
+    AR_APP_NAME="AutoRemesher"
+    AR_HOMEPAGE_URL="https://autoremesher.dust3d.org/"
+)
+if(WIN32)
+    target_sources(autoremesher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/autoremesher.rc")
+endif()
+if(MSVC)
+    target_compile_options(autoremesher PRIVATE /utf-8)
+endif()
+set_target_properties(autoremesher PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
+)
+# Multi-config generators (Visual Studio) would otherwise append /Release.
+foreach(_config IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(autoremesher PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_${_config} "${CMAKE_BINARY_DIR}/dist")
+endforeach()
+
+install(TARGETS autoremesher RUNTIME DESTINATION bin)
+
+if(AR_BUILD_TESTS)
+    enable_testing()
+    add_test(NAME cli_help COMMAND autoremesher --help)
+endif()

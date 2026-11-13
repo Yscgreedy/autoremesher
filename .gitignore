@@ -47,3 +47,12 @@ qrc_*.cpp
 .DS_Store
 
 moc/
+
+# CMake / Ninja CLI build output
+build/cli/
+dist/
+gui/dist/
+*.pdb
+
+# Local agent worktrees and scratch research
+.agents/

@@ -1,168 +1,158 @@
 # AutoRemesher
 
-AutoRemesher is a cross-platform automatic quad remeshing tool that converts high-polygon meshes into clean quad-based topology. It is built on top of libraries: [Geogram](https://github.com/BrunoLevy/geogram), [libigl](https://github.com/libigl), [isotropicremesher](https://github.com/huxingyi/isotropicremesher) and [others](https://github.com/huxingyi/autoremesher/blob/master/ACKNOWLEDGEMENTS.html).
+AutoRemesher is a cross-platform automatic quad remeshing tool that converts
+high-polygon meshes into clean quad-based topology. The remeshing core is built on
+[Eigen](https://eigen.tuxfamily.org/), [TBB](https://github.com/oneapi-src/oneTBB),
+[isotropicremesher](https://github.com/huxingyi/isotropicremesher) and
+[meshoptimizer](https://github.com/zeux/meshoptimizer); the full list is in
+[ACKNOWLEDGEMENTS.html](ACKNOWLEDGEMENTS.html).
 
-Buy me a coffee for staying up late coding :-) [![](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=GHALWLWXYGCU6&item_name=Support+me+coding+in+my+spare+time&currency_code=AUD&source=url)
+> **No Qt.** The project no longer links Qt (or OpenGL) anywhere. The remeshing
+> engine is a plain C++14 library, the application entry point is a headless CLI,
+> and the graphical interface is a separate Go program. See
+> [Architecture](#architecture) and [Migrating from the Qt GUI](#migrating-from-the-qt-gui).
 
-<img width="3644" height="2202" alt="autoremesher-1 0-screenshot" src="https://github.com/user-attachments/assets/47851f1e-127c-49af-81b7-0c8ac06fb3ad" />
+Buy me a coffee for staying up late coding :-)
+[![](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=GHALWLWXYGCU6&item_name=Support+me+coding+in+my+spare+time&currency_code=AUD&source=url)
 
-## Getting Started
+## Architecture
 
-These instructions will get you a copy of **AutoRemesher** up and running on your local machine for development.
+| part | path | built by | what it is |
+|---|---|---|---|
+| core | `src/AutoRemesher` | CMake (`autoremesher_core`) | C++14 quad remeshing pipeline: surface mesh, frame field, parameterization, quad cover, quad extraction. No GUI, no Qt. |
+| CLI | `src/cli/main.cpp` | CMake (`autoremesher`) | **The main executable.** Loads an OBJ, remeshes, writes a quad OBJ, speaks a JSON-lines protocol for the GUI. |
+| GUI | `gui/` | Go (`autoremesher-gui`) | Separate executable: a Go program (local HTTP server + embedded UI) that spawns the CLI and streams its progress. |
+| benchmark | `bench/` | CMake | Headless timing harness for the core (A/B numbers, thread pinning). |
+
+The CLI never starts a GUI, and the GUI never links the engine: the process boundary
+is the JSON protocol in [docs/cli-protocol.md](docs/cli-protocol.md).
+
+```
+gui/autoremesher-gui --spawn--> autoremesher.exe --json --> core library
+        ^                            |
+        +---- JSON lines / OBJ <-----+
+```
+
+## Building
 
 ### Prerequisites
 
-- C++ compiler with C++14 support (GCC, Clang, or MSVC)
-- Qt 5.15.2
-- TBB (Intel Threading Building Blocks)
-- CMake 3.12 or later (only needed on Windows to build TBB from source)
+- C++14 compiler (MSVC 2019+, GCC 8+, Clang 10+)
+- CMake 3.20+ and a generator (Ninja or Visual Studio)
+- TBB: the vendored 2017 source in `thirdparty/tbb` is built once by
+  `build/build_tbb.bat`; on Linux/macOS install a system TBB (`libtbb-dev`,
+  `brew install tbb`) and CMake will find it
+- Go 1.21+ — only for the graphical interface
 
-### Building
-
-#### Linux (Ubuntu/Debian)
-
-```bash
-# Install Qt and build tools
-sudo apt install build-essential qt5-qmake qtbase5-dev qttools5-dev-tools libqt5svg5-dev libqt5multimedia5-dev
-
-# Install TBB and OpenGL
-sudo apt install libtbb-dev libgl1-mesa-dev
-
-# Clone and build
-git clone https://github.com/huxingyi/autoremesher.git
-cd autoremesher
-qmake
-make -j$(nproc)
-```
-
-> **Fedora:** `sudo dnf install gcc-c++ qt5-qtbase-devel qt5-qttools-devel tbb-devel mesa-libGL-devel`
-
-#### Windows (Visual Studio 2022)
-
-1. Install [Visual Studio 2022](https://visualstudio.microsoft.com/) with **Desktop development with C++** workload.
-2. Install [CMake](https://cmake.org/download/) (required to build TBB from source).
-3. Install Qt 5.15.2 with the [online installer](https://www.qt.io/download-open-source) — select the `msvc2019_64` archive.
-4. Open a **x64 Native Tools Command Prompt for VS 2022** and run:
+### Windows (Visual Studio 2022/2026)
 
 ```cmd
-:: Build TBB from the bundled third-party source
-cd thirdparty\tbb
-cmake -B build2 ^
-    -DTBB_BUILD_SHARED=ON ^
-    -DTBB_BUILD_STATIC=OFF ^
-    -DTBB_BUILD_TBBMALLOC=OFF ^
-    -DTBB_BUILD_TBBMALLOC_PROXY=OFF ^
-    -DTBB_BUILD_TESTS=OFF
-cmake --build build2 --config Release
-cd ..\..
-
-:: Build AutoRemesher
-qmake -spec win32-msvc
-set CL=/MP
-nmake -f Makefile.Release
+build.bat
 ```
 
-The release binary will be at `release\autoremesher.exe`.
+That builds the static TBB (once), the CLI, and the Go GUI:
 
-#### Windows (MSYS2 / MinGW-w64)
+- `build\cli\dist\autoremesher.exe`
+- `gui\dist\autoremesher-gui.exe`
 
-An alternative to the MSVC toolchain that builds against Qt 6 from MSYS2.
+CLI only:
 
-1. Install [MSYS2](https://www.msys2.org/).
-2. From the **MSYS2 MINGW64** shell, install the toolchain and dependencies:
+```cmd
+scripts\build_cli.bat
+```
+
+### Linux / macOS
 
 ```bash
-pacman -S --needed \
-    mingw-w64-x86_64-gcc \
-    mingw-w64-x86_64-qt6-base \
-    mingw-w64-x86_64-tbb \
-    make
+cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cli -j
+# GUI (optional)
+cd gui && go build -o dist/autoremesher-gui ./cmd/autoremesher-gui
 ```
 
-3. Build from the same shell:
+`AR_TBB_STATIC_LIB` defaults to the Windows-only `build/tbb/tbb_static.lib`; when
+it does not exist CMake falls back to `find_package(TBB)`.
+
+## Command line
 
 ```bash
-cd /c/path/to/autoremesher
-qmake
-make -j$(nproc)
+autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 50000
 ```
 
-The binary will be at `release/autoremesher.exe`. Run it from the MINGW64 shell so the Qt 6 and oneTBB DLLs on `/mingw64/bin` are found, or bundle the dependencies next to the binary with `windeployqt-qt6 release/autoremesher.exe`.
-
-#### macOS
-
-```bash
-# Install Xcode Command Line Tools
-xcode-select --install
-
-# Install dependencies via Homebrew
-brew install qt@5 tbb cmake
-
-# Build
-export PATH="/usr/local/opt/qt@5/bin:$PATH"
-git clone https://github.com/huxingyi/autoremesher.git
-cd autoremesher
-qmake CONFIG+=sdk_no_version_check
-make -j$(sysctl -n hw.logicalcpu)
+```
+  -i, --input PATH            input OBJ (polygons are triangulated)
+  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)
+  -q, --target-quads N        requested quad count (default 20000)
+      --adaptivity F          gradient adaptivity 0..1 (default 0.5)
+      --anisotropy F          anisotropy 0..1 (default 0.0)
+      --sharp-edge DEG        sharp edge threshold (default 60)
+      --smooth-normal DEG     smooth normal threshold (default 0)
+      --edge-scaling F        edge scale multiplier (default 1.0)
+      --model-type T          organic | hard-surface
+      --exact-target-quads    solve the cover scale from the quad budget
+      --keep-island-fraction F, --keep-all-islands, --weld-patches,
+      --legacy-holes, --projected-caps, --local-remesh, --threads N
+      --json                  JSON-lines events on stdout (for the GUI)
+      --progress              progress on stderr
+      --verbose               per-phase report
+      --quiet, --version, --help
 ```
 
-### Running a quick test
+Exit codes: `0` success, `1` usage/input error, `2` remeshing failed, `3` write failed.
+The machine protocol (event shapes, throttling, error semantics) is documented in
+[docs/cli-protocol.md](docs/cli-protocol.md).
 
-AutoRemesher has a CLI mode for headless processing. Try it with one of the [common-3d-test-models](https://github.com/alecjacobson/common-3d-test-models):
+## Graphical interface (Go)
 
-```bash
-./autoremesher \
-    --input armadillo.obj \
-    --output remeshed.obj \
-    --report remeshed_report.txt \
-    --target-quads 50000 \
-    --edge-scaling 1.0 \
-    --sharp-edge 90.0 \
-    --smooth-normal 0.0 \
-    --adaptivity 1.0 \
-    --anisotropy 1.0
+![AutoRemesher GUI](docs/gui-screenshot.png)
+
+```cmd
+gui\dist\autoremesher-gui.exe --cli build\cli\dist\autoremesher.exe
 ```
 
-### Quick Start
+The GUI is a Go binary with no third-party modules: it serves an embedded page on
+`127.0.0.1` (random port, per-session token), opens the browser, and drives the CLI:
 
-#### Windows
+- drag & drop an OBJ, set parameters with sliders, run or cancel a job
+- live progress, per-phase report, log pane
+- WebGL preview of the resulting quad mesh (orbit, zoom, wireframe)
+- save the remeshed OBJ
 
-Download `autoremesher-<version>-win32-x86_64.zip` from [releases](https://github.com/huxingyi/autoremesher/releases), extract it and run `autoremesher.exe`.
+CLI discovery order: `--cli` flag, next to the GUI executable, `..\dist`, then
+`PATH`. See [gui/README.md](gui/README.md) for the flags and the design.
 
-#### macOS
+## Migrating from the Qt GUI
 
-Download `autoremesher-<version>.dmg` from [releases](https://github.com/huxingyi/autoremesher/releases).
+- `src/mainwindow.cpp`, `src/quadmeshgenerator.cpp`, the OpenGL preview classes,
+  `thirdparty/QtAwesome`, `thirdparty/QtWaitingSpinner`, `shaders/`,
+  `resources.qrc` and `autoremesher.pro` were deleted; `git log` keeps the history.
+- Live intermediate previews (source / isotropic / parameterization / singularities)
+  are not part of the Go GUI: the CLI exposes the final quad mesh. The core still
+  produces those intermediates, so a future `--dump-stage` option can feed a viewer.
+- The old `--report FILE` spelling is gone; use `--verbose`, which prints the same
+  phase report (and emits it as a `report` JSON event under `--json`).
 
-*For the first time, Apple will reject to run and popup something like "can't be opened because its integrity cannot be verified". Go to System Preferences > Security & Privacy > General and under "Allow apps downloaded from" click the button to allow it.*
+## Benchmark
 
-#### Linux
+`bench/` still drives the core directly, without Qt:
 
-Download `autoremesher-<version>.AppImage` from [releases](https://github.com/huxingyi/autoremesher/releases).
-
+```cmd
+bench\build_bench.bat
+build\bench\arbench.exe --input model.obj --target-quads 15000 --repeat 3 --verbose
 ```
-$ chmod a+x ./autoremesher-<version>.AppImage
-$ ./autoremesher-<version>.AppImage
-```
 
-### Links
+See [bench/README.md](bench/README.md) for the options and the local topology
+optimisation notes.
+
+## License
+
+AutoRemesher is licensed under the MIT License — see [LICENSE](LICENSE).
+
+## Links
 
 - [Check out open-source auto-retopology tool AutoRemesher](http://www.cgchannel.com/2020/08/check-out-open-source-auto-retopology-tool-autoremesher/) **cgchannel.com**
 - [A New Open-Source Auto-Retopology Tool](https://80.lv/articles/a-new-open-source-auto-retopology-tool/) **80.lv**
 - [[Non-Blender] Autoremesher auto-retopology tool released](https://www.blendernation.com/2020/08/18/non-blender-autoremesher-auto-retopology-tool-released/) **blendernation.com**
-- [オープンソースの新しいオートリメッシュツール Auto Remesher](https://cginterest.com/2020/08/20/%e3%82%aa%e3%83%bc%e3%83%97%e3%83%b3%e3%82%bd%e3%83%bc%e3%82%b9%e3%81%ae%e6%96%b0%e3%81%97%e3%81%84%e3%82%aa%e3%83%bc%e3%83%88%e3%83%aa%e3%83%a1%e3%83%83%e3%82%b7%e3%83%a5%e3%83%84%e3%83%bc%e3%83%ab-a/) **cginterest.com**
-- [AutoRemesher 1.0.0-alpha - 超高速で高品質のクワッドポリゴン生成！Dust3D開発者によるオープンソースの自動リメッシュツール！](https://3dnchu.com/archives/autoremesher-1-0-0-alpha/) **3dnchu.com**
 - [Open Source AutoRemesher released](https://cgpress.org/archives/open-source-remesher.html) **cgpress.org**
-- [「autoremesher」多角形を自動でリトポしてれる無料トポロジーツール](https://modelinghappy.com/archives/30339) **modelinghappy.com**
-- [Open Source Auto Remesher](https://blender-addons.org/open-source-auto-remesher/) **blender-addons.org**
-- [AutoRemesher | Auto-Retopology-Tool](https://www.digitalproduction.com/2020/08/05/autoremesher-auto-retopology-tool/) **digitalproduction.com**
-- [Autoremesher open source auto-retopology tool](https://blenderartists.org/t/autoremesher-open-source-auto-retopology-tool/1245131/126) **blenderartists.org**
-
-## License
-
-AutoRemesher is licensed under the MIT License - see the [LICENSE](https://github.com/huxingyi/autoremesher/blob/master/LICENSE) file for details.
-
-## Acknowledgements
-
-See the full [ACKNOWLEDGEMENTS](https://github.com/huxingyi/autoremesher/blob/master/ACKNOWLEDGEMENTS.html) for a list of libraries and resources used in this project.
 
 <!-- Sponsors begin --><!-- Sponsors end -->

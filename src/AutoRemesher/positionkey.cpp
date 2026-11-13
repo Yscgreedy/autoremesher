@@ -23,7 +23,31 @@
 
 namespace AutoRemesher {
 
-long PositionKey::m_toIntFactor = 100000;
+thread_local double PositionKey::m_tolerance = 1e-5;
+
+void PositionKey::setTolerance(double tolerance)
+{
+    m_tolerance = tolerance > 0.0 ? tolerance : 1e-5;
+}
+
+double PositionKey::tolerance()
+{
+    return m_tolerance;
+}
+
+// Truncation towards zero matches the historical (long)(x * 1e5) mapping, so a
+// unit-scale mesh keeps its exact keys.  Values saturate instead of wrapping: a
+// coordinate beyond 9e15 steps is meaningless as a key, and the previous 32-bit
+// long silently overflowed on Windows for anything past 21474 units.
+long long PositionKey::quantize(double value)
+{
+    const double scaled = value / m_tolerance;
+    if (scaled >= 9.0e15)
+        return 9000000000000000LL;
+    if (scaled <= -9.0e15)
+        return -9000000000000000LL;
+    return (long long)scaled;
+}
 
 PositionKey::PositionKey(const Vector3& v)
     : PositionKey(v.x(), v.y(), v.z())
@@ -36,9 +60,9 @@ PositionKey::PositionKey(double x, double y, double z)
     m_position.setY(y);
     m_position.setZ(z);
 
-    m_intX = (long)(x * m_toIntFactor);
-    m_intY = (long)(y * m_toIntFactor);
-    m_intZ = (long)(z * m_toIntFactor);
+    m_intX = quantize(x);
+    m_intY = quantize(y);
+    m_intZ = quantize(z);
 }
 
 const Vector3& PositionKey::position() const

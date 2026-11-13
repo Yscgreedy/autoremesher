@@ -98,6 +98,52 @@ public:
         m_smoothNormalDegrees = degrees;
     }
 
+    // When enabled, each island's quad cover scale is solved from the requested
+    // quad budget instead of being taken from the average edge length.  The
+    // adaptive scaling field can leave the requested count off by 2x, so the
+    // closed loop is what makes "target quads" an actual promise.
+    void setExactTargetQuads(bool exact)
+    {
+        m_exactTargetQuads = exact;
+    }
+
+    // The cross point weld step follows the island voxel size (1e-3 of it) when
+    // enabled, so models authored in any unit weld at the same rate.  Disabling
+    // it restores the historical fixed 1e-5, which collapses sub-millimetre
+    // models and over-merges very large ones.
+    void setRelativePositionTolerance(bool relative)
+    {
+        m_relativePositionTolerance = relative;
+    }
+
+    // 0 keeps only the largest extracted patch per island (historical).  A
+    // positive fraction keeps every patch above that share of the island area
+    // and welds their coincident vertices, so small parts are not thrown away.
+    void setIslandAreaFraction(double fraction)
+    {
+        m_islandAreaFraction = fraction;
+    }
+
+    void setWeldPatches(bool weld)
+    {
+        m_weldPatches = weld;
+    }
+
+    void setGradedHoleFilling(bool graded)
+    {
+        m_gradedHoleFilling = graded;
+    }
+
+    void setProjectedHoleCaps(bool projected)
+    {
+        m_projectedHoleCaps = projected;
+    }
+
+    void setLocalRemesh(bool enabled)
+    {
+        m_localRemesh = enabled;
+    }
+
     const std::vector<Vector3>& remeshedVertices()
     {
         return m_remeshedVertices;
@@ -235,6 +281,13 @@ private:
     double m_anisotropy = 1.0;
     double m_sharpEdgeDegrees = m_defaultSharpEdgeDegrees;
     double m_smoothNormalDegrees = 0.0;
+    bool m_exactTargetQuads = false;
+    bool m_relativePositionTolerance = true;
+    double m_islandAreaFraction = 0.0;
+    bool m_weldPatches = false;
+    bool m_gradedHoleFilling = true;
+    bool m_projectedHoleCaps = false;
+    bool m_localRemesh = false;
     ModelType m_modelType = ModelType::Organic;
     AutoRemesherProgressHandler m_progressHandler = nullptr;
     void* m_tag = nullptr;

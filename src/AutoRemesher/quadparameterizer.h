@@ -45,6 +45,10 @@ public:
         const std::vector<double>* faceScaling = nullptr,
         const std::vector<double>* faceScalingU = nullptr,
         const std::vector<double>* faceScalingV = nullptr,
+        // 0 keeps the legacy scale (scaling x average edge length); a positive
+        // value solves the cover scale so the surface area divided by the quad
+        // footprint matches this budget.
+        size_t targetQuadCount = 0,
         // Reports 0..1 across the quad cover solve, which is the single longest
         // step of the whole pipeline and would otherwise be one silent block.
         const ProgressHandler* progressHandler = nullptr);

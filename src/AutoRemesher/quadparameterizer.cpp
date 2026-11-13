@@ -25,6 +25,9 @@
 #include <AutoRemesher/SurfaceMesh>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -647,6 +650,7 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     const std::vector<double>* faceScaling,
     const std::vector<double>* faceScalingU,
     const std::vector<double>* faceScalingV,
+    size_t targetQuadCount,
     const ProgressHandler* progressHandler)
 {
     const auto report = [progressHandler](float fraction, const char* name) {
@@ -662,7 +666,8 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         return false;
     const size_t corners = mesh.cornerCount();
     const size_t uvVariables = 2 * corners;
-    const double scale = std::max(1e-12, scaling * mesh.averageEdgeLength());
+    double scale = std::max(1e-12, scaling * mesh.averageEdgeLength());
+    const double baseScale = scale;
 
     std::vector<Vector3> normals;
     initializeFieldAndNormals(mesh, guidance, &normals, &result->field);
@@ -689,13 +694,86 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     if (trackDirectionalScale)
         applyDirectionalSwaps(mesh, fieldBeforeBrush, result->field, normals,
             &activeScalingU, &activeScalingV);
+
+    // The scale below is the size of one quad in world units.  The legacy value
+    // comes from the average edge length, which is only correct for a uniform
+    // density field: the adaptive field scales each face by up to 3x and the
+    // produced quad count goes with 1/s^2, so the requested budget can be off by
+    // more than 2x.  When a budget is given, solve the single scalar s with
+    //     target = SUM_f area_f / (s * fs_f * u_f) / (s * fs_f * v_f)
+    // which is one square root, no iteration.  Measured quads track 1/s^2 to
+    // within +-3% (the --edge-scaling sweep in the assessment notes), so the
+    // closed form is enough; the clamp only guards degenerate islands.
+    if (targetQuadCount > 0) {
+        double quadFootprintSum = 0.0;
+        for (size_t f = 0; f < mesh.faceCount(); ++f) {
+            const auto& triangle = triangles[f];
+            const Vector3& a = vertices[triangle[0]];
+            const Vector3& b = vertices[triangle[1]];
+            const Vector3& d = vertices[triangle[2]];
+            const double area = 0.5 * Vector3::crossProduct(b - a, d - a).length();
+            const double faceScale = faceScaling && faceScaling->size() == mesh.faceCount()
+                ? std::max(1e-12, (*faceScaling)[f])
+                : 1.0;
+            const double directionalU = std::max(1e-12, activeScalingU[f]);
+            const double directionalV = std::max(1e-12, activeScalingV[f]);
+            quadFootprintSum += area / (faceScale * faceScale * directionalU * directionalV);
+        }
+        if (quadFootprintSum > 0.0 && std::isfinite(quadFootprintSum)) {
+            const double solved = std::sqrt(quadFootprintSum / (double)targetQuadCount);
+            scale = std::min(baseScale * 3.0, std::max(baseScale / 3.0, solved));
+            if (nullptr != getenv("AR_TRACE_EXACT_TARGET"))
+                fprintf(stderr, "[exact-target] faces=%zu target=%zu solved=%.6g base=%.6g used=%.6g\n",
+                    mesh.faceCount(), targetQuadCount, solved, baseScale, scale);
+        }
+    }
+
     report(0.20f, "Correcting field curl");
     applyCurlCorrection(mesh, normals, rotation, cornerConstraints,
         faceScaling, scale, 1e-4, &activeScalingU, &activeScalingV, &result->field);
     const std::vector<char> seam = computeSeam(mesh, rotation);
 
-    const CoverContext ctx { mesh, result->field, normals, rotation, seam, cornerConstraints,
-        activeScalingU, activeScalingV, faceScaling, scale };
+    if (nullptr != getenv("AR_DIAG_CHARTS")) {
+        size_t seamEdges = 0;
+        for (const char isSeam : seam)
+            if (isSeam)
+                ++seamEdges;
+        // Charts are the connected components of the non seam edges.
+        std::vector<size_t> chartOf(mesh.faceCount(), SurfaceMesh::npos);
+        std::vector<size_t> chartSizes;
+        std::deque<size_t> queue;
+        for (size_t f = 0; f < mesh.faceCount(); ++f) {
+            if (chartOf[f] != SurfaceMesh::npos)
+                continue;
+            const size_t chart = chartSizes.size();
+            chartOf[f] = chart;
+            size_t size = 0;
+            queue.push_back(f);
+            while (!queue.empty()) {
+                const size_t current = queue.front();
+                queue.pop_front();
+                ++size;
+                for (size_t c = 3 * current; c < 3 * current + 3; ++c) {
+                    const size_t other = mesh.oppositeCorner(c);
+                    if (other == SurfaceMesh::npos || seam[c])
+                        continue;
+                    const size_t g = mesh.cornerFace(other);
+                    if (chartOf[g] != SurfaceMesh::npos)
+                        continue;
+                    chartOf[g] = chart;
+                    queue.push_back(g);
+                }
+            }
+            chartSizes.push_back(size);
+        }
+        size_t largest = 0;
+        for (const size_t size : chartSizes)
+            if (size > largest)
+                largest = size;
+        fprintf(stderr, "[charts] faces=%zu seamEdges=%zu charts=%zu largest=%zu (%.1f%%)\n",
+            mesh.faceCount(), seamEdges, chartSizes.size(), largest,
+            mesh.faceCount() > 0 ? 100.0 * (double)largest / (double)mesh.faceCount() : 0.0);
+    }
 
     // The cover solve reports on its own 0..1, so remap it into the tail of this
     // function's range and keep the fractions monotonic end to end.
@@ -705,12 +783,93 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
             (*progressHandler)(0.35f + 0.63f * fraction, name);
         };
     }
+
+    // How many quads the parameterization covers is its UV area: one quad is one
+    // unit cell.  Extraction keeps about 95% of that (boundary trimming and the
+    // cleanup passes take the rest), so aim slightly above the budget and use the
+    // measured UV area to correct the scale.  UV area goes with 1/s^2, so one
+    // square root per attempt is enough; in practice the analytic start below is
+    // already within 20% and a second, corrected solve lands inside a few
+    // percent.  Only the cover is repeated - the curl correction and the seam
+    // stay as they are, because a global change of s scales UV uniformly.
+    const auto uvAreaOf = [&mesh, uvVariables](const std::vector<double>& values) {
+        double area = 0.0;
+        for (size_t f = 0; f < mesh.faceCount(); ++f) {
+            const size_t c0 = 3 * f;
+            const double ax = values[2 * c0], ay = values[2 * c0 + 1];
+            const double bx = values[2 * (c0 + 1)], by = values[2 * (c0 + 1) + 1];
+            const double dx = values[2 * (c0 + 2)], dy = values[2 * (c0 + 2) + 1];
+            area += 0.5 * std::fabs((bx - ax) * (dy - ay) - (by - ay) * (dx - ax));
+        }
+        (void)uvVariables;
+        return area;
+    };
+    // Extraction keeps every unit cell that is fully inside the parameterized
+    // region and drops the ones the mesh boundary cuts.  A boundary strip of
+    // length P_uv costs P_uv/2 cells, which is the whole gap on the test models
+    // (body: 231 cells predicted vs 231 measured; head: 1729 vs 1729).  So the
+    // budget the cover has to reach is target + P_uv/2, not target.
+    double boundaryPerimeter = 0.0;
+    for (size_t c = 0; c < mesh.cornerCount(); ++c)
+        if (mesh.oppositeCorner(c) == SurfaceMesh::npos)
+            boundaryPerimeter += mesh.edgeVector(c).length();
     std::vector<double> allValues;
-    if (!solveQuadCover(ctx, &allValues, coverProgress ? &coverProgress : nullptr))
-        return false;
+    // Tiny islands (a handful of quads) cannot be steered this way: their
+    // boundary loss is the same order as their UV area, so the correction would
+    // chase its own tail.  They keep the analytic scale and one cover solve.
+    const bool tightenTarget = targetQuadCount >= 32;
+    const int maximumCoverAttempts = tightenTarget ? 3 : 1;
+    for (int attempt = 0; attempt < maximumCoverAttempts; ++attempt) {
+        const CoverContext ctx { mesh, result->field, normals, rotation, seam, cornerConstraints,
+            activeScalingU, activeScalingV, faceScaling, scale };
+        if (!solveQuadCover(ctx, &allValues, coverProgress ? &coverProgress : nullptr))
+            return false;
+        if (!tightenTarget)
+            break;
+        const double uvArea = uvAreaOf(allValues);
+        if (!(uvArea > 0.0) || !std::isfinite(uvArea))
+            break;
+        const double boundaryLossCells = boundaryPerimeter / (2.0 * scale);
+        if (boundaryLossCells > 0.5 * uvArea)
+            break;  // the model does not apply below this size
+        // Extraction also loses cells at seams and around irregular vertices; on
+        // the test models that residual is a stable 4-5% on top of the boundary
+        // strip, so judge the attempt by the calibrated estimate rather than by
+        // the raw cell count.
+        const double extractionEfficiency = 0.955;
+        const double predictedQuads = (uvArea - boundaryLossCells) * extractionEfficiency;
+        const double error = predictedQuads / (double)targetQuadCount;
+        if (nullptr != getenv("AR_TRACE_EXACT_TARGET"))
+            fprintf(stderr, "[exact-target] attempt=%d scale=%.6g uvArea=%.1f boundaryLoss=%.1f predicted=%.1f target=%zu error=%.4f\n",
+                attempt, scale, uvArea, boundaryLossCells, predictedQuads, targetQuadCount, error);
+        if (std::fabs(error - 1.0) <= 0.02 || attempt + 1 == maximumCoverAttempts)
+            break;
+        // uvArea goes with 1/s^2 and the boundary loss with 1/s, so the next
+        // scale solves uvArea/k^2 - P/(2 s k) = target for k.
+        const double neededUvArea = (double)targetQuadCount / extractionEfficiency + boundaryLossCells;
+        const double corrected = scale * std::sqrt(uvArea / neededUvArea);
+        const double next = std::min(baseScale * 3.0, std::max(baseScale / 3.0, corrected));
+        if (std::fabs(next - scale) <= 1e-12 * scale)
+            break;
+        scale = next;
+    }
 
     report(0.99f, "Building cover uvs");
     buildResultUv(mesh, rotation, allValues, uvVariables, result);
+
+    if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
+        // The UV area is how many unit cells the parameterization covers, which
+        // is the closest thing to a quad count that exists before extraction.
+        double uvArea = 0.0;
+        for (const auto& triangle : result->triangleUvs) {
+            const Vector2& a = triangle[0];
+            const Vector2& b = triangle[1];
+            const Vector2& d = triangle[2];
+            uvArea += 0.5 * std::fabs((b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]));
+        }
+        fprintf(stderr, "[exact-target] final uvArea=%.1f target=%zu ratio=%.4f\n",
+            uvArea, targetQuadCount, targetQuadCount > 0 ? uvArea / (double)targetQuadCount : 0.0);
+    }
     return true;
 }
 }

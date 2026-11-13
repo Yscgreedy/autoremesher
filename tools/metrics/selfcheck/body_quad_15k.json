@@ -1,0 +1,89 @@
+{
+  "file": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\out\\body_quad_15k.obj",
+  "tool": "mesh_metrics",
+  "version": 1,
+  "bytes": 462011,
+  "parse_seconds": 0.011,
+  "objects": 0,
+  "vertices": 8272,
+  "faces": 8214,
+  "warnings": [],
+  "quads": 8129,
+  "tri_faces": 17,
+  "ngon_faces": 68,
+  "non_quad_faces": 85,
+  "quad_ratio": 0.9896518139761383,
+  "quad_ratio_pct": 98.96518139761383,
+  "face_size_histogram": {
+    "3": 17,
+    "4": 8129,
+    "5": 68
+  },
+  "used_vertices": 8272,
+  "unreferenced_vertices": 0,
+  "bbox": {
+    "min": [
+      -0.18702,
+      -0.493311,
+      -0.097939
+    ],
+    "max": [
+      0.182327,
+      0.476445,
+      0.0992291
+    ],
+    "size": [
+      0.369347,
+      0.9697560000000001,
+      0.1971681
+    ],
+    "diagonal": 1.0562760839868572
+  },
+  "area_total": 0.5387984615952253,
+  "area_by_diag2": 0.4829158431675907,
+  "edges_unique": 16486,
+  "edges_boundary": 77,
+  "edges_interior": 16397,
+  "edges_non_manifold": 12,
+  "edge_multiplicity_max": 3,
+  "edge_length": {
+    "min": 5.463378075879173e-05,
+    "p05": 0.003547255990105719,
+    "median": 0.007932147494140344,
+    "mean": 0.008199923446434805,
+    "p95": 0.013289133200487762,
+    "max": 0.019243940028445355,
+    "std": 0.003057216214856807
+  },
+  "edge_length_median_by_diag": 0.00750953999090927,
+  "valence_histogram": {
+    "2": 41,
+    "3": 218,
+    "4": 7855,
+    "5": 135,
+    "6": 20,
+    "7": 3
+  },
+  "valence_mean": 3.9859767891682787,
+  "valence_max": 7,
+  "valence4_ratio": 0.9495889748549323,
+  "irregular_vertices": 417,
+  "normal_inconsistent_edges": 139,
+  "normal_inconsistent_ratio": 0.008431396336285334,
+  "max_dihedral_deg": 179.71617541756225,
+  "components": 1,
+  "components_largest_face_ratio": 1.0,
+  "components_top2_face_ratio": 1.0,
+  "components_top3_face_ratio": 1.0,
+  "components_face_histogram": [
+    8214
+  ],
+  "components_small_face_count": 0,
+  "boundary_loops": 1,
+  "boundary_vertices": 77,
+  "degenerate_faces": 0,
+  "degenerate_ratio": 0.0,
+  "triangles_after_fan": 16479,
+  "compute_seconds": 0.029,
+  "total_seconds": 0.04
+}

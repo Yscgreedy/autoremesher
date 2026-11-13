@@ -1,12 +1,16 @@
 name: release
 
 on:
+  # Tags only: this workflow publishes artifacts, it is not a check for commits.
+  # It used to run on every push to master/ci and fail there, because it still
+  # drives qmake against a .pro file that commit 21ad0f9c deleted along with the
+  # Qt GUI.  Until the pipeline is ported to CMake + Go (see
+  # docs/ARCH-REFACTOR-MERGE-PLAN.md, S3) it stays out of the push path so a red
+  # run on master means something again.
   push:
-    branches:
-      - master
-      - ci
     tags:
       - '*'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

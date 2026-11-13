@@ -11,6 +11,10 @@ name: release
 #
 # TBB comes from the vendored 2017 tree under thirdparty/tbb, built per platform,
 # so the artifacts do not depend on a prebuilt library that is not in the repo.
+# GCC 15 rejects that tree with -Wchanges-meaning; Linux therefore builds it
+# (and the core that includes its headers) with -fpermissive -w.  That is a
+# third-party legacy tree, not our code: see the note in
+# docs/ARCH-REFACTOR-MERGE-PLAN.md.
 
 on:
   push:
@@ -49,14 +53,18 @@ jobs:
 
       - name: Build the vendored TBB (unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
+          flags=()
+          if [ "$RUNNER_OS" = "Linux" ]; then flags+=('-DCMAKE_CXX_FLAGS=-fpermissive -w'); fi
           cmake -S thirdparty/tbb -B build/tbb \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DTBB_BUILD_SHARED=OFF \
             -DTBB_BUILD_TBBMALLOC=OFF \
             -DTBB_BUILD_TBBMALLOC_PROXY=OFF \
-            -DTBB_BUILD_TESTS=OFF
+            -DTBB_BUILD_TESTS=OFF \
+            ${flags[@]}
           cmake --build build/tbb --parallel
           find build/tbb -maxdepth 2 -name 'libtbb*' | head
 
@@ -64,13 +72,16 @@ jobs:
         if: runner.os == 'Windows'
         run: cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release
 
-      - name: Configure the CLI (unix, vendored static TBB)
+      - name: Configure the CLI (unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
-          lib="$(find build/tbb -maxdepth 2 -name 'libtbb*.a' | head -1)"
+          lib=$(find build/tbb -maxdepth 2 -name 'libtbb*.a' | head -1)
           echo "vendored TBB: ${lib:-none}"
-          cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release \
-            ${lib:+-DAR_TBB_STATIC_LIB="$(pwd)/$lib"}
+          args=()
+          if [ -n "$lib" ]; then args+=("-DAR_TBB_STATIC_LIB=$(pwd)/$lib"); fi
+          if [ "$RUNNER_OS" = "Linux" ]; then args+=('-DCMAKE_CXX_FLAGS=-fpermissive -w'); fi
+          cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release ${args[@]}
 
       - name: Build the CLI
         run: cmake --build build/cli --config Release --parallel

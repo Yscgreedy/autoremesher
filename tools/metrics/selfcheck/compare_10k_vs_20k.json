@@ -1,0 +1,288 @@
+{
+  "rows": [
+    {
+      "metric": "vertices",
+      "label": "vertices",
+      "baseline": 5357,
+      "candidate": 14788,
+      "delta": 9431,
+      "digits": 0,
+      "better": null
+    },
+    {
+      "metric": "faces",
+      "label": "faces",
+      "baseline": 5142,
+      "candidate": 14730,
+      "delta": 9588,
+      "digits": 0,
+      "better": null
+    },
+    {
+      "metric": "quads",
+      "label": "quads",
+      "baseline": 4810,
+      "candidate": 14303,
+      "delta": 9493,
+      "digits": 0,
+      "better": true
+    },
+    {
+      "metric": "quad_ratio_pct",
+      "label": "quad ratio (%)",
+      "baseline": 93.54336833916764,
+      "candidate": 97.1011541072641,
+      "delta": 3.5577857680964513,
+      "digits": 3,
+      "better": true
+    },
+    {
+      "metric": "tri_faces",
+      "label": "tri faces",
+      "baseline": 99,
+      "candidate": 85,
+      "delta": -14,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "ngon_faces",
+      "label": "n-gons (>4)",
+      "baseline": 233,
+      "candidate": 342,
+      "delta": 109,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "edges_non_manifold",
+      "label": "non-manifold edges",
+      "baseline": 124,
+      "candidate": 188,
+      "delta": 64,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "edges_boundary",
+      "label": "boundary edges",
+      "baseline": 178,
+      "candidate": 95,
+      "delta": -83,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "boundary_loops",
+      "label": "boundary loops",
+      "baseline": 5,
+      "candidate": 3,
+      "delta": -2,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "components",
+      "label": "components",
+      "baseline": 70,
+      "candidate": 1,
+      "delta": -69,
+      "digits": 0,
+      "better": null
+    },
+    {
+      "metric": "components_largest_face_ratio",
+      "label": "largest component ratio",
+      "baseline": 0.9527421236872812,
+      "candidate": 1.0,
+      "delta": 0.04725787631271883,
+      "digits": 4,
+      "better": true
+    },
+    {
+      "metric": "components_top2_face_ratio",
+      "label": "top-2 component ratio",
+      "baseline": 0.9556592765460911,
+      "candidate": 1.0,
+      "delta": 0.04434072345390894,
+      "digits": 4,
+      "better": true
+    },
+    {
+      "metric": "components_top3_face_ratio",
+      "label": "top-3 component ratio",
+      "baseline": 0.9577985219758849,
+      "candidate": 1.0,
+      "delta": 0.04220147802411511,
+      "digits": 4,
+      "better": true
+    },
+    {
+      "metric": "components_small_face_count",
+      "label": "small shells (<=3 faces)",
+      "baseline": 48,
+      "candidate": 0,
+      "delta": -48,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "degenerate_faces",
+      "label": "degenerate faces",
+      "baseline": 22,
+      "candidate": 2,
+      "delta": -20,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "normal_inconsistent_edges",
+      "label": "normal-inconsistent edges",
+      "baseline": 1049,
+      "candidate": 1163,
+      "delta": 114,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "irregular_vertices",
+      "label": "irregular vertices",
+      "baseline": 1654,
+      "candidate": 1999,
+      "delta": 345,
+      "digits": 0,
+      "better": false
+    },
+    {
+      "metric": "valence4_ratio",
+      "label": "valence-4 ratio",
+      "baseline": 0.6912450998693298,
+      "candidate": 0.8648228293210711,
+      "delta": 0.17357772945174132,
+      "digits": 4,
+      "better": true
+    },
+    {
+      "metric": "area_total",
+      "label": "surface area",
+      "baseline": 1.9114158739318743,
+      "candidate": 2.1080975711957572,
+      "delta": 0.19668169726388296,
+      "digits": 6,
+      "better": null
+    },
+    {
+      "metric": "edge_length.median",
+      "label": "edge len median",
+      "baseline": 0.017164393852186696,
+      "candidate": 0.011721885026087672,
+      "delta": -0.005442508826099025,
+      "digits": 6,
+      "better": null
+    },
+    {
+      "metric": "edge_length.p95",
+      "label": "edge len p95",
+      "baseline": 0.0352022742256095,
+      "candidate": 0.02047792438876237,
+      "delta": -0.014724349836847131,
+      "digits": 6,
+      "better": null
+    },
+    {
+      "metric": "edge_length.max",
+      "label": "edge len max",
+      "baseline": 0.0698656079701594,
+      "candidate": 0.035730601434764565,
+      "delta": -0.03413500653539483,
+      "digits": 6,
+      "better": null
+    },
+    {
+      "metric": "ref.deviation.mean",
+      "label": "deviation mean",
+      "baseline": 0.0010767126063347678,
+      "candidate": 0.000778438995689537,
+      "delta": -0.00029827361064523083,
+      "digits": 6,
+      "better": false
+    },
+    {
+      "metric": "ref.deviation.p95",
+      "label": "deviation p95",
+      "baseline": 0.0029496535995059033,
+      "candidate": 0.0019200286985604725,
+      "delta": -0.0010296249009454307,
+      "digits": 6,
+      "better": false
+    },
+    {
+      "metric": "ref.deviation.max",
+      "label": "deviation max",
+      "baseline": 0.011937914811007717,
+      "candidate": 0.005468634414889939,
+      "delta": -0.0064692803961177775,
+      "digits": 6,
+      "better": false
+    },
+    {
+      "metric": "ref.coverage.covered_ratio",
+      "label": "ref coverage",
+      "baseline": 0.6096809736064507,
+      "candidate": 0.8496027156525526,
+      "delta": 0.23992174204610195,
+      "digits": 4,
+      "better": true
+    },
+    {
+      "metric": "ref.total_seconds",
+      "label": "ref compare seconds",
+      "baseline": 19.676,
+      "candidate": 26.486,
+      "delta": 6.810000000000002,
+      "digits": 3,
+      "better": false
+    },
+    {
+      "metric": "total_seconds",
+      "label": "metrics total seconds",
+      "baseline": 20.412,
+      "candidate": 27.253,
+      "delta": 6.841000000000001,
+      "digits": 3,
+      "better": false
+    }
+  ],
+  "regressions": [
+    {
+      "metric": "edges_non_manifold",
+      "message": "non-manifold edges increased: 124 -> 188"
+    }
+  ],
+  "warnings": [
+    {
+      "metric": "components",
+      "message": "connected components changed (decreased): 70 -> 1"
+    },
+    {
+      "metric": "ngon_faces",
+      "message": "n-gons (>4) increased: 233 -> 342"
+    },
+    {
+      "metric": "normal_inconsistent_edges",
+      "message": "normal-inconsistent edges increased: 1049 -> 1163"
+    },
+    {
+      "metric": "area_total",
+      "message": "surface area changed 10.29% (> 1%): 1.91142 -> 2.1081"
+    }
+  ],
+  "verdict": "REGRESSION",
+  "baseline_file": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\out\\head_quad_10k.obj",
+  "candidate_file": "E:\\ComfyUI-aki-v3\\zcode_work\\char3d\\out\\head_quad_20k.obj",
+  "thresholds": {
+    "quad_ratio_pp": 1.0,
+    "deviation_p95_rel": 0.02,
+    "largest_component_ratio": 0.02
+  }
+}

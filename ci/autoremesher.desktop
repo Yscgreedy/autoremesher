@@ -2,6 +2,6 @@
 Type=Application
 Name=AutoRemesher
 Icon=autoremesher
-Exec=autoremesher
+Exec=autoremesher-gui
 Categories=Graphics;
 Comment=Automatic quad remeshing tool

@@ -1,0 +1,76 @@
+name: gates
+
+# The clang-format job lives in development.yml (macOS runner).  These are the
+# structural and build gates that used to have no executor at all:
+#
+#   structure  - the generated source list matches src/core, the layering rules
+#                hold, and the R4/R8 ratchets in tools/boundary_baseline.json
+#                are not exceeded
+#   go         - the Go GUI compiles, is formatted, and its tests pass
+#   build      - the vendored TBB and the C++ CLI actually build with MSVC
+#
+# workflow_dispatch is here so the gates can be triggered on a branch that has
+# never run Actions before (a fork starts with workflows disabled).
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  structure:
+    name: structure (source list + layering)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generated source list is current
+        run: python tools/gen_sources.py --check
+      - name: Layering and budget rules
+        run: python tools/check_boundaries.py
+
+  go:
+    name: go (fmt, vet, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gui/go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  build:
+    name: build (windows, MSVC) + vendored TBB
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the vendored TBB
+        shell: cmd
+        run: scripts\build_tbb.bat
+      - name: Configure
+        run: cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/cli --config Release --parallel
+      - name: Smoke test
+        shell: cmd
+        run: build\cli\dist\autoremesher.exe --version

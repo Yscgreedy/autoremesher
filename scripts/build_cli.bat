@@ -6,7 +6,7 @@ cd /d "%~dp0.."
 
 if not exist build\tbb\tbb_static.lib (
     echo [build] static TBB missing, building it once...
-    call build\build_tbb.bat || exit /b 1
+    call scripts\build_tbb.bat || exit /b 1
 )
 
 cmake -S . -B build\cli -DCMAKE_BUILD_TYPE=Release || exit /b 1

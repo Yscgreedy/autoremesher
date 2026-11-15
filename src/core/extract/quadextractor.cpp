@@ -336,6 +336,8 @@ bool QuadExtractor::extract()
             Log::write(Log::Debug, "Local topology optimisation applied " + std::to_string(applied) + " operation(s), " + std::to_string(patches) + " patch(es)");
         rebuildHalfEdges();
     }
+    if (m_cleanDegenerate)
+        validateRemeshedMesh();
     report(1.0f, "");
 
     // A uv the passes could not follow is worth less than no uv at all: the
@@ -3034,6 +3036,222 @@ bool QuadExtractor::removeNonManifoldFaces()
     }
     m_remeshedPolygons = manifoldFaces;
     return changed;
+}
+
+void QuadExtractor::validateRemeshedMesh()
+{
+    // Every pass above reconnects faces one defect at a time, and a merge can
+    // land on a face that already exists: pairing a pentagon with a triangle
+    // reads the same quad out of two neighbours, so the merged quad is appended
+    // twice.  Nothing checked the result afterwards, and the duplicate is not
+    // cosmetic - a face and its copy make every edge they share look shared by
+    // three faces, which is what the report used to call "non-manifold output",
+    // while those same edges are plain hole boundaries once the copy is gone.
+    // Measured on the shoe case: 26 duplicated quads produced the 104
+    // non-manifold edges in the JSON, and removing them left the 37 boundary
+    // edges Blender reports for the same file.  Validate once, here, so the file
+    // that is written and the file that is described are the same mesh.
+    if (m_remeshedVertices.empty() || m_remeshedPolygons.empty())
+        return;
+
+    Vector3 minimum = m_remeshedVertices[0];
+    Vector3 maximum = minimum;
+    for (const auto& vertex : m_remeshedVertices) {
+        for (int i = 0; i < 3; ++i) {
+            minimum[i] = std::min(minimum[i], vertex[i]);
+            maximum[i] = std::max(maximum[i], vertex[i]);
+        }
+    }
+    double diagonal = (maximum - minimum).length();
+    if (!(diagonal > 0.0))
+        diagonal = 1.0;
+    // One part in ten million is far below any feature a quad mesh resolves and
+    // far above the last-bit noise two intersection computations leave behind.
+    const double weldDistance = 1e-7 * diagonal;
+    const double minimumArea = 1e-14 * diagonal * diagonal;
+
+    // Zero length edges poison every downstream number (the length percentiles
+    // and the aspect ratios the caller measures), and they are cheap to remove:
+    // weld the pair and let the face keep its other corners.
+    std::vector<size_t> parent(m_remeshedVertices.size());
+    for (size_t i = 0; i < parent.size(); ++i)
+        parent[i] = i;
+    const auto findRoot = [&parent](size_t index) {
+        size_t root = index;
+        while (parent[root] != root)
+            root = parent[root];
+        while (parent[index] != root) {
+            const size_t next = parent[index];
+            parent[index] = root;
+            index = next;
+        }
+        return root;
+    };
+    for (const auto& face : m_remeshedPolygons) {
+        const size_t count = face.size();
+        for (size_t i = 0; i < count; ++i) {
+            const size_t first = face[i];
+            const size_t second = face[(i + 1) % count];
+            if (first >= parent.size() || second >= parent.size())
+                continue;
+            if ((m_remeshedVertices[first] - m_remeshedVertices[second]).length() > weldDistance)
+                continue;
+            const size_t firstRoot = findRoot(first);
+            const size_t secondRoot = findRoot(second);
+            if (firstRoot == secondRoot)
+                continue;
+            parent[secondRoot] = firstRoot;
+            ++m_extractionStats.weldedVertices;
+        }
+    }
+    if (m_extractionStats.weldedVertices > 0) {
+        for (auto& face : m_remeshedPolygons) {
+            for (auto& index : face) {
+                if (index < parent.size())
+                    index = findRoot(index);
+            }
+        }
+    }
+
+    const auto faceArea = [this](const std::vector<size_t>& face) {
+        if (face.size() < 3)
+            return 0.0;
+        for (const auto& index : face) {
+            if (index >= m_remeshedVertices.size())
+                return 0.0;
+        }
+        const Vector3& origin = m_remeshedVertices[face[0]];
+        Vector3 sum;
+        for (size_t i = 1; i + 1 < face.size(); ++i) {
+            sum = sum + Vector3::crossProduct(m_remeshedVertices[face[i]] - origin, m_remeshedVertices[face[i + 1]] - origin);
+        }
+        return 0.5 * sum.length();
+    };
+
+    // A face set is what a caller duplicates by accident, so the de-duplication
+    // key is the sorted vertex list: it catches the plain repeat and the copy
+    // written with the opposite winding, which is the shipping failure mode.
+    std::vector<std::vector<size_t>> keptFaces;
+    keptFaces.reserve(m_remeshedPolygons.size());
+    std::set<std::vector<size_t>> uniqueFaces;
+    std::vector<size_t> key;
+    for (auto& face : m_remeshedPolygons) {
+        if (face.size() < 3) {
+            ++m_extractionStats.degenerateFacesRemoved;
+            continue;
+        }
+        bool usable = true;
+        key.assign(face.begin(), face.end());
+        std::sort(key.begin(), key.end());
+        for (size_t i = 1; i < key.size(); ++i) {
+            if (key[i] == key[i - 1]) {
+                usable = false;
+                break;
+            }
+        }
+        if (!usable || key.back() >= m_remeshedVertices.size()) {
+            ++m_extractionStats.degenerateFacesRemoved;
+            continue;
+        }
+        if (faceArea(face) <= minimumArea) {
+            ++m_extractionStats.degenerateFacesRemoved;
+            continue;
+        }
+        if (!uniqueFaces.insert(key).second) {
+            ++m_extractionStats.duplicateFacesRemoved;
+            continue;
+        }
+        keptFaces.push_back(std::move(face));
+    }
+    const bool facesChanged = keptFaces.size() != m_remeshedPolygons.size();
+    if (facesChanged)
+        m_remeshedPolygons = std::move(keptFaces);
+
+    // Counting faces per undirected edge needs its own map: buildEdgeToFaceMap
+    // stores one face index per directed edge, which answers a different
+    // question.
+    std::map<std::pair<size_t, size_t>, size_t> edgeUseCount;
+    for (const auto& face : m_remeshedPolygons) {
+        const size_t count = face.size();
+        for (size_t i = 0; i < count; ++i) {
+            const size_t first = face[i];
+            const size_t second = face[(i + 1) % count];
+            const auto edge = first < second ? std::make_pair(first, second)
+                                             : std::make_pair(second, first);
+            ++edgeUseCount[edge];
+        }
+    }
+    size_t overSharedEdges = 0;
+    for (const auto& it : edgeUseCount) {
+        if (it.second > 2)
+            ++overSharedEdges;
+    }
+    // Anything left is not a duplication but a merge that overlapped a
+    // neighbour, and no single-face rule can undo it: drop the faces around it.
+    // Bounded, because removeNonManifoldFaces judges vertices, not edges, and
+    // cannot be trusted to converge on its own.
+    for (size_t pass = 0; pass < 3 && overSharedEdges > 0; ++pass) {
+        const size_t before = m_remeshedPolygons.size();
+        if (!removeNonManifoldFaces())
+            break;
+        removeIsolatedFaces();
+        if (m_remeshedPolygons.size() >= before)
+            break;
+        m_extractionStats.nonManifoldFacesRemoved += before - m_remeshedPolygons.size();
+        edgeUseCount.clear();
+        for (const auto& face : m_remeshedPolygons) {
+            const size_t count = face.size();
+            for (size_t i = 0; i < count; ++i) {
+                const size_t first = face[i];
+                const size_t second = face[(i + 1) % count];
+                const auto edge = first < second ? std::make_pair(first, second)
+                                                 : std::make_pair(second, first);
+                ++edgeUseCount[edge];
+            }
+        }
+        overSharedEdges = 0;
+        for (const auto& it : edgeUseCount) {
+            if (it.second > 2)
+                ++overSharedEdges;
+        }
+    }
+
+    if (facesChanged || m_extractionStats.weldedVertices > 0
+        || m_extractionStats.nonManifoldFacesRemoved > 0) {
+        std::set<size_t> usedVertices;
+        for (const auto& face : m_remeshedPolygons) {
+            for (const auto& index : face)
+                usedVertices.insert(index);
+        }
+        if (usedVertices.size() < m_remeshedVertices.size()) {
+            std::unordered_map<size_t, size_t> oldToNew;
+            compactRemeshedVerticesAscending(usedVertices, &oldToNew);
+            for (auto& face : m_remeshedPolygons) {
+                for (auto& index : face) {
+                    auto found = oldToNew.find(index);
+                    if (oldToNew.end() != found)
+                        index = found->second;
+                }
+            }
+        }
+        rebuildHalfEdges();
+    }
+
+    size_t openEdges = 0;
+    size_t nonManifoldEdges = 0;
+    for (const auto& it : edgeUseCount) {
+        if (1 == it.second)
+            ++openEdges;
+        else if (it.second > 2)
+            ++nonManifoldEdges;
+    }
+    m_extractionStats.openEdges = openEdges;
+    m_extractionStats.nonManifoldEdges = nonManifoldEdges;
+    if (m_extractionStats.duplicateFacesRemoved > 0
+        || m_extractionStats.degenerateFacesRemoved > 0
+        || m_extractionStats.weldedVertices > 0) {
+        Log::write(Log::Debug, "Validate: welded " + std::to_string(m_extractionStats.weldedVertices) + " vertex/vertices, removed " + std::to_string(m_extractionStats.degenerateFacesRemoved) + " degenerate and " + std::to_string(m_extractionStats.duplicateFacesRemoved) + " duplicate face(s)");
+    }
 }
 
 namespace {

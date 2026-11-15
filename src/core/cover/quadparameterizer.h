@@ -72,6 +72,7 @@ public:
     double extractionEfficiency() const { return m_extractionEfficiency; }
 
     void setTargetQuadCount(size_t targetQuads) { m_targetQuadCount = targetQuads; }
+
     size_t targetQuadCount() const { return m_targetQuadCount; }
 
     // Result of the last solve run through this instance, empty when the budget
@@ -95,7 +96,11 @@ public:
         // Filled with the samples the budget search took, which one was kept and
         // why it stopped; untouched on the legacy path.
         CoverBudgetReport* budgetReport = nullptr,
-        double extractionEfficiency = 0.955);
+        double extractionEfficiency = 0.955,
+        // 0 keeps the budget loop's own policy; 1 spends a single cover solve per
+        // island, which is the speed switch a caller picks when it would rather
+        // have the wall clock than the last few percent of count accuracy.
+        int maximumCoverAttempts = 0);
 
     // Instance form of the solve, with the budget knobs and the trace kept on the
     // object.  Named apart because the static form above has to keep its exact

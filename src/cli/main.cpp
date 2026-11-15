@@ -159,6 +159,8 @@ struct Options {
     std::set<std::string> explicitFlags;
     // Chart-aware UV packing; --no-uv-pack restores the historical strip layout.
     bool uvPacking = true;
+    // 0 = the budget loop's own policy; 1 = one cover solve per island.
+    int coverAttempts = 0;
     // Degenerate cleanup: zero length edges, degenerate and duplicate faces.
     bool cleanDegenerate = true;
     // The consumer contract asks for quad_aspect_max <= --max-aspect with 20 as
@@ -688,6 +690,8 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->cleanDegenerate = true;
         } else if (arg == "--max-aspect") {
             options->maxAspect = number();
+        } else if (arg == "--cover-attempts") {
+            options->coverAttempts = static_cast<int>(number());
         } else if (arg == "--symmetry-tolerance") {
             options->symmetryTolerance = number();
         } else if (arg == "--deviation") {
@@ -1829,6 +1833,7 @@ int main(int argc, char** argv)
     remesher.setProjectedHoleCaps(options.projectedCaps);
     remesher.setLocalRemesh(options.localRemesh);
     remesher.setMaximumAspect(options.maxAspect);
+    remesher.setCoverAttempts(options.coverAttempts);
     remesher.setExportUvs(options.writeUvs);
     // A per-vertex UV channel can only describe charts that do not share vertices,
     // so packing a vertex-mode layout needs the mesh cut at the chart seams.  Without

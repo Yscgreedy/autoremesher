@@ -726,7 +726,8 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     size_t targetQuadCount,
     const ProgressHandler* progressHandler,
     CoverBudgetReport* budgetReport,
-    double extractionEfficiency)
+    double extractionEfficiency,
+    int maximumCoverAttemptsRequested)
 {
     const auto report = [progressHandler](float fraction, const char* name) {
         if (nullptr != progressHandler && *progressHandler)
@@ -929,7 +930,12 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     // attempts buy samples and a winner, not convergence.
     const double scaleLowerBound = baseScale / 3.0;
     const double scaleUpperBound = baseScale * 3.0;
-    const int maximumCoverAttempts = tightenTarget ? 4 : 1;
+    // The correction pass is worth a solve per attempt; a caller that asked for a
+    // specific budget wins over the default policy, and one attempt is always
+    // allowed so --cover-attempts 1 is a real speed switch.
+    int maximumCoverAttempts = tightenTarget ? 4 : 1;
+    if (maximumCoverAttemptsRequested > 0)
+        maximumCoverAttempts = tightenTarget ? std::min(4, std::max(1, maximumCoverAttemptsRequested)) : 1;
     // A sample that overshot bounds the target scale from below and one that came
     // short bounds it from above, so the pair brackets the answer once both exist.
     double boundBelow = 0.0, boundAbove = 0.0;

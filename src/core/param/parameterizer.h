@@ -93,6 +93,12 @@ public:
         m_targetQuadCount = targetQuads;
     }
 
+    // 0 keeps the budget loop's policy; 1 spends one cover solve per island.
+    void setMaximumCoverAttempts(int attempts)
+    {
+        m_maximumCoverAttempts = attempts;
+    }
+
     void setSingularitySimplification(bool simplify)
     {
         m_singularitySimplification = simplify;
@@ -126,6 +132,7 @@ private:
     double m_maxAspectRatio = 2.3;
     bool m_singularitySimplification = true;
     size_t m_targetQuadCount = 0;
+    int m_maximumCoverAttempts = 0;
     size_t m_maximumSingularityPairDistance = 6;
     ProgressHandler m_progressHandler;
 

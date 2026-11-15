@@ -180,6 +180,14 @@ public:
         m_maximumAspect = maximumAspect;
     }
 
+    // 0 keeps the budget loop's own policy.  1 is the speed switch: one cover
+    // solve per island instead of the correction pass, at the price of a few
+    // percent of count accuracy.
+    void setCoverAttempts(int attempts)
+    {
+        m_coverAttempts = attempts;
+    }
+
     const std::vector<Vector3>& remeshedVertices()
     {
         return m_remeshedVertices;
@@ -539,6 +547,7 @@ private:
     bool m_projectedHoleCaps = false;
     bool m_localRemesh = false;
     double m_maximumAspect = 0.0;
+    int m_coverAttempts = 0;
     TopologyStats m_inputStats;
     TopologyStats m_outputStats;
     bool m_inputAnalyzed = false;

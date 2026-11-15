@@ -31,7 +31,7 @@ namespace AutoRemesher {
 // that cannot answer this leaves the user with eyeballing only.
 struct DeviationStats {
     size_t samples = 0;
-    size_t unresolved = 0;   // points with no triangle within the search rings
+    size_t unresolved = 0; // points with no triangle within the search rings
     double mean = 0.0;
     double p50 = 0.0;
     double p95 = 0.0;

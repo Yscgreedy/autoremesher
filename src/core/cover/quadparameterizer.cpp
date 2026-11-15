@@ -31,7 +31,9 @@
 #include <deque>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
+#include <map>
 #include <queue>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -640,6 +642,66 @@ namespace {
                 size_t c = 3 * f + l;
                 result->triangleUvs[f][l] = Vector2(uv[2 * c], uv[2 * c + 1]);
             }
+
+        // Chart ids straight from the cover: two triangles stay in one chart when
+        // the solved UVs agree at both ends of the edge they share.  After the
+        // integer snap above, sides of a cut are a whole cell apart while solver
+        // residual inside a chart is a fraction of a percent.  Kept on: the
+        // extractor does not consume these ids yet, but they are the solver's own
+        // answer and cost one pass over the triangles.
+        std::vector<size_t> parent(mesh.faceCount());
+        for (size_t f = 0; f < parent.size(); ++f)
+            parent[f] = f;
+        const std::function<size_t(size_t)> chartRoot = [&parent](size_t index) {
+            while (parent[index] != index) {
+                parent[index] = parent[parent[index]];
+                index = parent[index];
+            }
+            return index;
+        };
+        const auto uniteCharts = [&](size_t first, size_t second) {
+            const size_t a = chartRoot(first);
+            const size_t b = chartRoot(second);
+            if (a != b)
+                parent[b] = a;
+        };
+        const auto uvAtVertex = [&mesh, &uv](size_t face, size_t vertex) -> const double* {
+            for (size_t local = 0; local < 3; ++local) {
+                const size_t corner = 3 * face + local;
+                if (mesh.cornerVertex(corner) == vertex)
+                    return &uv[2 * corner];
+            }
+            return nullptr;
+        };
+        const double chartTolerance = 0.05;
+        for (size_t corner = 0; corner < mesh.cornerCount(); ++corner) {
+            const size_t opposite = mesh.oppositeCorner(corner);
+            if (opposite == SurfaceMesh::npos || corner > opposite)
+                continue;
+            const size_t first = mesh.cornerFace(corner);
+            const size_t second = mesh.cornerFace(opposite);
+            if (first == second)
+                continue;
+            const size_t v0 = mesh.cornerVertex(corner);
+            const size_t v1 = mesh.cornerVertex(mesh.nextCorner(corner));
+            const double* a0 = uvAtVertex(first, v0);
+            const double* b0 = uvAtVertex(second, v0);
+            const double* a1 = uvAtVertex(first, v1);
+            const double* b1 = uvAtVertex(second, v1);
+            if (nullptr == a0 || nullptr == b0 || nullptr == a1 || nullptr == b1)
+                continue;
+            const double difference = std::max(
+                std::max(std::fabs(a0[0] - b0[0]), std::fabs(a0[1] - b0[1])),
+                std::max(std::fabs(a1[0] - b1[0]), std::fabs(a1[1] - b1[1])));
+            if (difference <= chartTolerance)
+                uniteCharts(first, second);
+        }
+        result->triangleCharts.assign(mesh.faceCount(), 0);
+        std::map<size_t, int> chartIds;
+        for (size_t f = 0; f < mesh.faceCount(); ++f) {
+            const auto inserted = chartIds.insert({ chartRoot(f), (int)chartIds.size() });
+            result->triangleCharts[f] = inserted.first->second;
+        }
     }
 
 }

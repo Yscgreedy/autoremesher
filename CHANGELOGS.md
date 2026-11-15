@@ -36,6 +36,17 @@ Unreleased
   where the two channels disagree on area). Measured: sphere 12k corner 0 degenerate
   UV faces / p99 3.7, vertex 9 / 62, hybrid 2 / 3.4; multi_part corner 38 degenerate,
   vertex 2577 - which is why corner stays the default
+- The cover now reports its own chart ids: `QuadParameterizer::Result::triangleCharts`
+  (and `Parameterizer::triangleCharts()`) unions triangles whose solved cover UVs
+  agree on the shared edge.  The seam split still infers charts from the per-face
+  UVs, because the extractor's isoline branches do not follow these ids: on the
+  12k sphere the solver sees one chart while the extraction needs 22 seams.  The
+  ids are exposed for the extractor change that will tag each cross point with
+  them, and are computed in one pass over the triangles.
+- Progress reporting on many-island models: finding the slowest island scanned
+  every island on every report, which made `--json` take 63 s on the 17,958-shell
+  input while the same run took 5.5 s without it.  The scan is rate limited to
+  20 ms; the percentage stays exact and only the step label can lag a frame
 - UV seam splitting (`--uv-mode seam`): src/core/param/uvcharts.* unions faces into
   charts by comparing the per-face chart UVs on their shared edges (1% of the UV
   extent: inside a chart the independent evaluations agree to ~0.1%, across a seam the

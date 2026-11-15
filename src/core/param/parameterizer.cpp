@@ -417,6 +417,7 @@ bool Parameterizer::parameterize()
     report(0.99f, "Collecting singularities");
     m_originalTriangleUvs = cover.triangleUvs;
     m_triangleUvs = std::make_unique<std::vector<std::vector<Vector2>>>(cover.triangleUvs);
+    m_triangleCharts = cover.triangleCharts;
     m_singularVertexPositions.clear();
     m_singularVertexIndices.clear();
     for (const size_t v : cover.singularVertices) {

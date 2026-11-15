@@ -48,9 +48,12 @@ struct ChartSplit {
 // UVs is left untouched and its corners do not join any chart.  uvScale is the
 // UV extent used to decide whether two faces agree (pass the bounding box
 // diagonal of the UVs, or 0 to let the function estimate it).
+// faceCharts, when it has one entry per face, is the cover's own chart id for that
+// face and skips the inference above entirely - the solver knows where it cut.
 ChartSplit splitAtChartSeams(const std::vector<Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
     const std::vector<std::vector<Vector2>>& faceUvs,
+    const std::vector<int>& faceCharts = std::vector<int>(),
     double uvScale = 0.0);
 
 }

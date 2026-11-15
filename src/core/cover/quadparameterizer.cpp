@@ -23,6 +23,7 @@
 #include <AutoRemesher/MixedIntegerLeastSquares>
 #include <AutoRemesher/QuadParameterizer>
 #include <AutoRemesher/SurfaceMesh>
+#include <core/base/logging.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -722,9 +723,13 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         if (quadFootprintSum > 0.0 && std::isfinite(quadFootprintSum)) {
             const double solved = std::sqrt(quadFootprintSum / (double)targetQuadCount);
             scale = std::min(baseScale * 3.0, std::max(baseScale / 3.0, solved));
-            if (nullptr != getenv("AR_TRACE_EXACT_TARGET"))
-                fprintf(stderr, "[exact-target] faces=%zu target=%zu solved=%.6g base=%.6g used=%.6g\n",
+            if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
+                char trace[512];
+                snprintf(trace, sizeof(trace),
+                    "[exact-target] faces=%zu target=%zu solved=%.6g base=%.6g used=%.6g\n",
                     mesh.faceCount(), targetQuadCount, solved, baseScale, scale);
+                Log::write(Log::Normal, trace);
+            }
         }
     }
 
@@ -770,9 +775,14 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         for (const size_t size : chartSizes)
             if (size > largest)
                 largest = size;
-        fprintf(stderr, "[charts] faces=%zu seamEdges=%zu charts=%zu largest=%zu (%.1f%%)\n",
-            mesh.faceCount(), seamEdges, chartSizes.size(), largest,
-            mesh.faceCount() > 0 ? 100.0 * (double)largest / (double)mesh.faceCount() : 0.0);
+        {
+            char trace[512];
+            snprintf(trace, sizeof(trace),
+                "[charts] faces=%zu seamEdges=%zu charts=%zu largest=%zu (%.1f%%)\n",
+                mesh.faceCount(), seamEdges, chartSizes.size(), largest,
+                mesh.faceCount() > 0 ? 100.0 * (double)largest / (double)mesh.faceCount() : 0.0);
+            Log::write(Log::Debug, trace);
+        }
     }
 
     // The cover solve reports on its own 0..1, so remap it into the tail of this
@@ -839,9 +849,13 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         const double extractionEfficiency = 0.955;
         const double predictedQuads = (uvArea - boundaryLossCells) * extractionEfficiency;
         const double error = predictedQuads / (double)targetQuadCount;
-        if (nullptr != getenv("AR_TRACE_EXACT_TARGET"))
-            fprintf(stderr, "[exact-target] attempt=%d scale=%.6g uvArea=%.1f boundaryLoss=%.1f predicted=%.1f target=%zu error=%.4f\n",
+        if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
+            char trace[512];
+            snprintf(trace, sizeof(trace),
+                "[exact-target] attempt=%d scale=%.6g uvArea=%.1f boundaryLoss=%.1f predicted=%.1f target=%zu error=%.4f\n",
                 attempt, scale, uvArea, boundaryLossCells, predictedQuads, targetQuadCount, error);
+            Log::write(Log::Normal, trace);
+        }
         if (std::fabs(error - 1.0) <= 0.02 || attempt + 1 == maximumCoverAttempts)
             break;
         // uvArea goes with 1/s^2 and the boundary loss with 1/s, so the next
@@ -867,8 +881,11 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
             const Vector2& d = triangle[2];
             uvArea += 0.5 * std::fabs((b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]));
         }
-        fprintf(stderr, "[exact-target] final uvArea=%.1f target=%zu ratio=%.4f\n",
+        char trace[512];
+        snprintf(trace, sizeof(trace),
+            "[exact-target] final uvArea=%.1f target=%zu ratio=%.4f\n",
             uvArea, targetQuadCount, targetQuadCount > 0 ? uvArea / (double)targetQuadCount : 0.0);
+        Log::write(Log::Normal, trace);
     }
     return true;
 }

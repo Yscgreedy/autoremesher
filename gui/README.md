@@ -102,11 +102,12 @@ elsewhere). Closing the browser or losing the SSE connection never kills a job.
 | `anisotropy` | 0 … 1 | 0 |
 | `sharpEdge` | 0 … 180 | 60 |
 | `smoothNormal` | 0 … 180 | 0 |
-| `modelType` | `organic` / `hard-surface` | organic |
+| `modelType` | `organic` / `hard-surface` | organic (picking a preset moves the four knobs to the CLI preset table) |
 | `threads` | 0 … 256 (0 = all) | 0 |
 | `keepIslandFraction` | 0 … 1 | 0 |
 | `edgeScaling` | 0.01 … 100 | 1 |
-| `exactTargetQuads`, `weldPatches`, `legacyHoles`, `projectedCaps`, `localRemesh` | booleans | off |
+| `exactTargetQuads` | bool | **on** (a target slider that lands 30% low reads as a bug) |
+| `weldPatches`, `legacyHoles`, `projectedCaps`, `localRemesh` | booleans | off |
 
 Out-of-range values are rejected with `400` and a message that names the field.
 

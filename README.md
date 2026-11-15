@@ -81,24 +81,48 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
 
 ```
   -i, --input PATH            input OBJ (polygons are triangulated)
-  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)
-  -q, --target-quads N        requested quad count (default 20000)
+  -o, --output PATH           output OBJ of quads with vt and vn (default:
+                              <input>_remeshed.obj)
+      --no-uv                 do not write vt lines
+      --no-normals            do not write vn lines
+  -q, --target-quads N        requested quad count (default 20000); the cover
+                              scale is solved from this budget, so the result
+                              lands within about ±5%
       --adaptivity F          gradient adaptivity 0..1 (default 0.5)
       --anisotropy F          anisotropy 0..1 (default 0.0)
       --sharp-edge DEG        sharp edge threshold (default 60)
       --smooth-normal DEG     smooth normal threshold (default 0)
       --edge-scaling F        edge scale multiplier (default 1.0)
-      --model-type T          organic | hard-surface
-      --exact-target-quads    solve the cover scale from the quad budget
+      --preset P              organic | hard-surface: fills every knob the command
+                              line did not name (default organic)
+      --model-type T          alias of --preset
+      --exact-target-quads    solve the cover scale from the quad budget (default)
+      --legacy-target-quads   take the scale from the average edge length instead,
+                              which lands around 0.7N..1.05N
       --keep-island-fraction F, --keep-all-islands, --weld-patches,
       --legacy-holes, --projected-caps, --local-remesh, --threads N
-      --json                  JSON-lines events on stdout (for the GUI)
+      --json                  JSON-lines events on stdout (for the GUI); result
+                              carries topology, holes, patches and phase timings
+      --log-level L           quiet | normal | debug
       --progress              progress on stderr
       --verbose               per-phase report
       --quiet, --version, --help
 ```
 
 Exit codes: `0` success, `1` usage/input error, `2` remeshing failed, `3` write failed.
+
+Output format: quad (and occasional n-gon) faces, with one `vt` per face corner and one
+`vn` per vertex. The UVs are the island's own parameterization, mapped onto each quad
+through the chart under its centroid, so a cover seam falls between faces rather than
+through them; islands are laid out side by side in UV space and the whole set is
+normalized into the unit square. A face whose chart is degenerate falls back to its own
+planar frame. Normals are area weighted and smooth.
+
+The CLI reports what it decided, not just how long it took: input topology (boundary
+edges and loops, non-manifold edges, components, degenerate faces) is counted before
+the run and surfaced as warnings, and the result carries the output topology, how many
+holes were filled or left open, how many extracted patches were kept or dropped, and a
+machine readable copy of the phase report.
 The machine protocol (event shapes, throttling, error semantics) is documented in
 [docs/cli-protocol.md](docs/cli-protocol.md).
 

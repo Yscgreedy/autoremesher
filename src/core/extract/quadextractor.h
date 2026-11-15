@@ -56,6 +56,33 @@ public:
         return m_remeshedPolygons;
     }
 
+    // What the last extract() run did, counted on the mesh that run ended with
+    // rather than on the sum of its internal passes.  fixHoles() runs twice and
+    // the second, post-cleanup pass walks the same still-open loops again, so:
+    //   - holesFilled / holeFacesAdded only grow when a pass really appended
+    //     faces (a capped loop is gone by the next pass, nothing is counted
+    //     twice), and they accumulate over both passes because both caps are part
+    //     of the mesh that comes out;
+    //   - holesIgnored is reset by every pass, so it reports the holes that were
+    //     still open when the last pass returned.
+    struct ExtractionStats {
+        size_t holesFilled = 0;      // holes (loops) actually filled on the final mesh
+        size_t holesIgnored = 0;     // holes skipped (too long / no projected caps)
+        size_t holeFacesAdded = 0;   // faces created by hole filling
+        size_t patchesKept = 0;      // extracted patches kept for this island
+        size_t patchesDropped = 0;   // patches thrown away
+        size_t boundaryLoops = 0;    // output boundary loops, if cheap to compute
+        size_t openEdges = 0;        // output open (boundary) edges
+        size_t nonManifoldEdges = 0; // output non-manifold edges
+    };
+
+    // Statistics of the mesh extract() produced; updated by extract() itself, so
+    // they are only meaningful once it has run.
+    const ExtractionStats& extractionStats() const
+    {
+        return m_extractionStats;
+    }
+
     // The raw connections produced by extractConnections(), before graph cleanup.
     const std::vector<std::pair<Vector3, Vector3>>& extractedConnections() const
     {
@@ -173,6 +200,8 @@ private:
     bool m_gradedHoleFilling = false;
     bool m_projectedHoleCaps = false;
     bool m_localRemesh = false;
+    // Filled by extract() and its hole/patch passes; see ExtractionStats.
+    ExtractionStats m_extractionStats;
     ProgressHandler m_progressHandler;
     // Ear clipping over the loop's best fit plane followed by quad pairing; adds
     // the faces it can and returns how many it added.
@@ -255,6 +284,16 @@ private:
     void mergeSharedFiveEdgeFaces(const ProgressHandler* progressHandler = nullptr);
     bool removeNonManifoldFaces();
     void rebuildHalfEdges();
+    // One hole really got its faces appended: counted, and the faces it added go
+    // into the running total.  A pass that only re-walks a loop an earlier pass
+    // already capped adds nothing, which is what keeps the counters from doubling.
+    void recordFilledHole(size_t facesAdded)
+    {
+        if (0 == facesAdded)
+            return;
+        ++m_extractionStats.holesFilled;
+        m_extractionStats.holeFacesAdded += facesAdded;
+    }
     void fixHoles();
 };
 

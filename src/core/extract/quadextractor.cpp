@@ -21,13 +21,13 @@
 #include <AutoRemesher/MeshSeparator>
 #include <AutoRemesher/PositionKey>
 #include <AutoRemesher/QuadExtractor>
+#include <core/base/logging.h>
 #include <algorithm>
 #include <axisalignedboundingbox.h>
 #include <axisalignedboundingboxtree.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <set>
@@ -115,9 +115,10 @@ bool QuadExtractor::extract()
     // cross point is created.  Zero restores the historical fixed 1e-5 even when
     // a previous extraction on this thread set a relative step.
     PositionKey::setTolerance(m_positionTolerance > 0.0 ? m_positionTolerance : 1e-5);
+    m_extractionStats = ExtractionStats();
 
     report(0.0f, "Extracting connections");
-    std::cerr << "Extract connections..." << std::endl;
+    Log::write(Log::Debug, "Extract connections...");
     std::vector<Vector3> crossPoints;
     std::vector<size_t> crossPointSourceTriangles;
     std::set<std::pair<size_t, size_t>> connections;
@@ -159,7 +160,7 @@ bool QuadExtractor::extract()
             m_extractedConnectionMoved.push_back(0);
         }
     }
-    std::cerr << "Extract connections done" << std::endl;
+    Log::write(Log::Debug, "Extract connections done");
 
 #if AUTO_REMESHER_DEV
     {
@@ -176,7 +177,7 @@ bool QuadExtractor::extract()
 #endif
 
     report(0.21f, "Extracting edges");
-    std::cerr << "Extract edges..." << std::endl;
+    Log::write(Log::Debug, "Extract edges...");
     std::unordered_map<size_t, std::unordered_set<size_t>> edgeConnectMap;
     extractEdges(connections, &edgeConnectMap);
     if (collapseShortEdges(&crossPoints, &edgeConnectMap))
@@ -185,7 +186,7 @@ bool QuadExtractor::extract()
     if (removeSingleEndpoints(&crossPoints, &edgeConnectMap))
         simplifyGraph(edgeConnectMap);
 
-    std::cerr << "Extract edges done" << std::endl;
+    Log::write(Log::Debug, "Extract edges done");
 
 #if AUTO_REMESHER_DEV
     {
@@ -217,9 +218,9 @@ bool QuadExtractor::extract()
 #endif
 
     report(0.25f, "Extracting mesh");
-    std::cerr << "Extract mesh..." << std::endl;
+    Log::write(Log::Debug, "Extract mesh...");
     extractMesh(crossPoints, crossPointSourceTriangles, edgeConnectMap, &m_remeshedPolygons);
-    std::cerr << "Extract mesh done" << std::endl;
+    Log::write(Log::Debug, "Extract mesh done");
 
     report(0.29f, "Fixing holes");
     fixHoles();
@@ -239,11 +240,10 @@ bool QuadExtractor::extract()
                 fprintf(fp, " %zu", 1 + v);
             }
             if (indices.size() != it.size()) {
-                std::cerr << "Found repeated vertices in face:";
-                for (const auto& v : it) {
-                    std::cerr << v << " ";
-                }
-                std::cerr << std::endl;
+                std::string repeated;
+                for (const auto& v : it)
+                    repeated += " " + std::to_string(v);
+                Log::write(Log::Debug, "Found repeated vertices in face:" + repeated);
             }
             fprintf(fp, "\n");
         }
@@ -290,9 +290,9 @@ bool QuadExtractor::extract()
     }
 
     report(0.31f, "Smoothing and projecting");
-    std::cerr << "Smooth and project..." << std::endl;
+    Log::write(Log::Debug, "Smooth and project...");
     smoothAndProject(5);
-    std::cerr << "Smooth and project done" << std::endl;
+    Log::write(Log::Debug, "Smooth and project done");
 
     report(0.44f, "Splitting seven edge faces");
     splitSevenEdgeFaces();
@@ -336,8 +336,7 @@ bool QuadExtractor::extract()
         const size_t applied = optimizeLocalTopology(4000);
         const size_t patches = requadrangulateNonQuadPatches(2000);
         if (applied > 0 || patches > 0)
-            std::cerr << "Local topology optimisation applied " << applied << " operation(s), "
-                      << patches << " patch(es)" << std::endl;
+            Log::write(Log::Debug, "Local topology optimisation applied " + std::to_string(applied) + " operation(s), " + std::to_string(patches) + " patch(es)");
         rebuildHalfEdges();
     }
     report(1.0f, "");
@@ -1360,8 +1359,8 @@ void QuadExtractor::holdSingularLines(std::vector<Vector3>* crossPoints,
         ++walkedCones;
     }
 
-    std::cerr << "Hold singular lines walked " << walkedCones << " of " << starvedCones
-              << " starved cone(s), added " << addedConnections << " connection(s)" << std::endl;
+    Log::write(Log::Debug, "Hold singular lines walked " + std::to_string(walkedCones) + " of "
+            + std::to_string(starvedCones) + " starved cone(s), added " + std::to_string(addedConnections) + " connection(s)");
 }
 
 bool QuadExtractor::testPointInTriangle(const std::vector<Vector3>& points,
@@ -1406,8 +1405,9 @@ void QuadExtractor::fixHoles()
     // discovery stays deterministic, so it gets its own ordered copy.
     std::set<std::pair<size_t, size_t>> orderedHalfEdges(m_halfEdges.begin(), m_halfEdges.end());
     std::vector<std::vector<size_t>> loops;
-    searchBoundaries(orderedHalfEdges, &loops);
     size_t gradedFaces = 0;
+    m_extractionStats.holesIgnored = 0;  // this pass sees the holes still open
+    searchBoundaries(orderedHalfEdges, &loops);
     for (auto& loop : loops) {
         if (m_gradedHoleFilling && loop.size() > 8
             && (loop.size() <= 65 || m_projectedHoleCaps)) {
@@ -1415,21 +1415,26 @@ void QuadExtractor::fixHoles()
             // non-positive, which is exactly what the large holes hit.  Seal them
             // by ear clipping instead; the triangle cleanup passes that run
             // afterwards pair the triangles into quads where they can.
-            std::cerr << "Fixing hole (graded) at length:" << loop.size() << "..." << std::endl;
-            gradedFaces += fillHoleGraded(loop);
+            Log::write(Log::Debug, "Fixing hole (graded) at length:" + std::to_string(loop.size()));
+            const size_t added = fillHoleGraded(loop);
+            gradedFaces += added;
+            recordFilledHole(added);
             continue;
         }
         if (loop.size() > 65) {
-            std::cerr << "Ignore long hole at length:" << loop.size() << std::endl;
+            Log::write(Log::Debug, "Ignore long hole at length:" + std::to_string(loop.size()));
+            ++m_extractionStats.holesIgnored;
             continue;
         }
-        std::cerr << "Fixing hole at length:" << loop.size() << "..." << std::endl;
+        Log::write(Log::Debug, "Fixing hole at length:" + std::to_string(loop.size()));
+        const size_t facesBeforeHole = m_remeshedPolygons.size();
         fixHoleWithQuads(loop, true);
         if (loop.size() >= 4)
             fixHoleWithQuads(loop, false);
+        recordFilledHole(m_remeshedPolygons.size() - facesBeforeHole);
     }
     if (m_gradedHoleFilling && gradedFaces > 0) {
-        std::cerr << "Graded hole filling added " << gradedFaces << " face(s)" << std::endl;
+        Log::write(Log::Debug, "Graded hole filling added " + std::to_string(gradedFaces) + " face(s)");
         rebuildHalfEdges();
     }
 }
@@ -1728,10 +1733,9 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
         std::map<size_t, size_t> sizeHistogram;
         for (const auto& face : m_remeshedPolygons)
             ++sizeHistogram[face.size()];
-        fprintf(stderr, "[topo] before, faces by size:");
-        for (const auto& it : sizeHistogram)
-            fprintf(stderr, " %zu:%zu", it.first, it.second);
-        fprintf(stderr, "\n");
+        std::string sizes;
+        for (const auto& it : sizeHistogram) sizes += " " + std::to_string(it.first) + ":" + std::to_string(it.second);
+        Log::write(Log::Debug, "[topo] before, faces by size:" + sizes);
         // Which re-pairings are even available: edge adjacent pairs where at
         // least one side is not a quad, keyed by the two face sizes.
         std::map<std::pair<size_t, size_t>, size_t> pairCensus;
@@ -1745,10 +1749,9 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
             ++pairCensus[std::make_pair(std::min(firstSize, secondSize),
                 std::max(firstSize, secondSize))];
         }
-        fprintf(stderr, "[topo] candidate pairs (small:large):");
-        for (const auto& it : pairCensus)
-            fprintf(stderr, " %zu:%zu=%zu", it.first.first, it.first.second, it.second);
-        fprintf(stderr, "\n");
+        std::string pairs;
+        for (const auto& it : pairCensus) pairs += " " + std::to_string(it.first.first) + ":" + std::to_string(it.first.second) + "=" + std::to_string(it.second);
+        Log::write(Log::Debug, "[topo] candidate pairs (small:large):" + pairs);
     }
 
     size_t mergeCount = 0;
@@ -1882,7 +1885,7 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
                     touchedVertices.insert(vertex);
                 ++mergeCount;
                 if (trace)
-                    fprintf(stderr, "[topo] merge %zu -> %zu\n", mergedFrom, merged.size());
+                    Log::write(Log::Debug, "[topo] merge " + std::to_string(mergedFrom) + " -> " + std::to_string(merged.size()));
                 return true;
             }
             const size_t n = unionPolygon.size();
@@ -1907,8 +1910,7 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
                 touchedVertices.insert(vertex);
             ++splitCount;
             if (trace)
-                fprintf(stderr, "[topo] split %zu -> %zu+%zu\n", n, firstFace.size(),
-                    secondFace.size());
+                Log::write(Log::Debug, "[topo] split " + std::to_string(n) + " -> " + std::to_string(firstFace.size()) + "+" + std::to_string(secondFace.size()));
             return true;
         }
         return false;
@@ -1937,11 +1939,9 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
         std::map<size_t, size_t> sizeHistogram;
         for (const auto& face : m_remeshedPolygons)
             ++sizeHistogram[face.size()];
-        fprintf(stderr, "[topo] applied merges:%zu splits:%zu, faces by size now:",
-            mergeCount, splitCount);
-        for (const auto& it : sizeHistogram)
-            fprintf(stderr, " %zu:%zu", it.first, it.second);
-        fprintf(stderr, "\n");
+        std::string sizes;
+        for (const auto& it : sizeHistogram) sizes += " " + std::to_string(it.first) + ":" + std::to_string(it.second);
+        Log::write(Log::Debug, "[topo] applied merges:" + std::to_string(mergeCount) + " splits:" + std::to_string(splitCount) + ", faces by size now:" + sizes);
     }
 
     // Pull the rewired patches back onto the source surface, the way every other
@@ -2613,9 +2613,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                                 else if (it.second.size() > 2)
                                     ++badEdges;
                             }
-                            fprintf(stderr, "[patch] %zu faces, %zu corners -> %zu quads, "
-                                            "open edges %zu, non-manifold %zu\n",
-                                patchFaces.size(), corners, bestQuads.size(), openEdges, badEdges);
+                            Log::write(Log::Debug, "[patch] " + std::to_string(patchFaces.size()) + " faces, " + std::to_string(corners) + " corners -> " + std::to_string(bestQuads.size()) + " quads, open edges " + std::to_string(openEdges) + ", non-manifold " + std::to_string(badEdges));
                         }
                         ++applied;
                         solved = true;
@@ -2729,15 +2727,9 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
     }
 
     if (trace)
-        fprintf(stderr, "[patch] applied %zu, even boundaries %zu (no valid quadrangulation %zu, "
-                        "valence floor %zu), odd or oversized %zu, convex loops %zu, "
-                        "concave-targeted growths %zu\n",
-            applied, attempts, geometryRejected, valenceRejected, oddBoundary, convexLoops,
-            concaveGrowth);
+        Log::write(Log::Debug, "[patch] applied " + std::to_string(applied) + ", even boundaries " + std::to_string(attempts) + " (no valid quadrangulation " + std::to_string(geometryRejected) + ", valence floor " + std::to_string(valenceRejected) + "), odd or oversized " + std::to_string(oddBoundary) + ", convex loops " + std::to_string(convexLoops) + ", concave-targeted growths " + std::to_string(concaveGrowth));
     if (trace)
-        fprintf(stderr, "[patch] quad refusals: edge %zu, reflex %zu, sine %zu, planarity %zu, "
-                        "normal %zu, duplicate %zu\n",
-            rejectEdge, rejectReflex, rejectSine, rejectPlanarity, rejectNormal, rejectDuplicate);
+        Log::write(Log::Debug, "[patch] quad refusals: edge " + std::to_string(rejectEdge) + ", reflex " + std::to_string(rejectReflex) + ", sine " + std::to_string(rejectSine) + ", planarity " + std::to_string(rejectPlanarity) + ", normal " + std::to_string(rejectNormal) + ", duplicate " + std::to_string(rejectDuplicate));
 
     return applied;
 }
@@ -2754,7 +2746,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
 
     for (;;) {
         if (hole.size() <= 2) {
-            std::cerr << "fixHoleWithQuads cancel on edge length:" << hole.size() << std::endl;
+            Log::write(Log::Debug, "fixHoleWithQuads cancel on edge length:" + std::to_string(hole.size()));
             return;
         }
 
@@ -2788,7 +2780,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
             const auto& score = edgeScores[edgeIndex];
             if (checkScore) {
                 if (score.second <= 0) {
-                    std::cerr << "fixHoleWithQuads failed, highest score(dot):" << score.second << std::endl;
+                    Log::write(Log::Debug, "fixHoleWithQuads failed, highest score(dot):" + std::to_string(score.second));
                     return;
                 }
             }
@@ -2798,7 +2790,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
             int k = (j + 1) % hole.size();
             std::vector<size_t> candidate = { (size_t)hole[k], (size_t)hole[j], (size_t)hole[i], (size_t)hole[h] };
             if (m_halfEdges.end() != m_halfEdges.find({ candidate[0], candidate[1] }) || m_halfEdges.end() != m_halfEdges.find({ candidate[1], candidate[2] }) || m_halfEdges.end() != m_halfEdges.find({ candidate[2], candidate[3] }) || m_halfEdges.end() != m_halfEdges.find({ candidate[3], candidate[0] })) {
-                std::cerr << "fixHoleWithQuads ignore score:" << score.second << " because conflicts with existed quads" << std::endl;
+                Log::write(Log::Debug, "fixHoleWithQuads ignore score:" + std::to_string(score.second) + " because conflicts with existed quads");
                 continue;
             }
             std::vector<size_t> remainPoints;
@@ -2808,7 +2800,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
                 remainPoints.push_back(hole[w]);
             }
             if (testPointInTriangle(m_remeshedVertices, { candidate[0], candidate[1], candidate[2] }, remainPoints) || testPointInTriangle(m_remeshedVertices, { candidate[2], candidate[3], candidate[0] }, remainPoints)) {
-                std::cerr << "fixHoleWithQuads ignore score:" << score.second << " because other point in the same loop fall into quad plane" << std::endl;
+                Log::write(Log::Debug, "fixHoleWithQuads ignore score:" + std::to_string(score.second) + " because other point in the same loop fall into quad plane");
                 continue;
             }
             m_remeshedPolygons.push_back(candidate);
@@ -2832,7 +2824,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
 void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& halfEdges,
     std::vector<std::vector<size_t>>* loops)
 {
-    std::cerr << "Searching boundaries..." << std::endl;
+    Log::write(Log::Debug, "Searching boundaries...");
 
     std::unordered_map<size_t, std::unordered_set<size_t>> nextMap;
     for (const auto& it : halfEdges) {
@@ -2846,17 +2838,17 @@ void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& 
         std::vector<size_t> loop;
         size_t startVertex = it->first;
         bool validate = false;
-        std::cerr << "Searching loop from:" << startVertex << std::endl;
+        Log::write(Log::Debug, "Searching loop from:" + std::to_string(startVertex));
         while (it != nextMap.end()) {
             if (startVertex == it->first && loop.size() >= 3) {
-                std::cerr << "Found valid loop, size:" << loop.size() << std::endl;
+                Log::write(Log::Debug, "Found valid loop, size:" + std::to_string(loop.size()));
                 validate = true;
                 break;
             }
-            std::cerr << "Loop add vertex:" << it->first << std::endl;
+            Log::write(Log::Debug, "Loop add vertex:" + std::to_string(it->first));
             loop.push_back(it->first);
             if (it->second.size() != 1) {
-                std::cerr << "Break loop, because of next size:" << it->second.size() << std::endl;
+                Log::write(Log::Debug, "Break loop, because of next size:" + std::to_string(it->second.size()));
                 break;
             }
             it = nextMap.find(*it->second.begin());
@@ -2867,7 +2859,7 @@ void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& 
             loops->push_back(loop);
     }
 
-    std::cerr << "Searching boundaries done" << std::endl;
+    Log::write(Log::Debug, "Searching boundaries done");
 }
 
 bool QuadExtractor::removeIsolatedFaces()
@@ -2880,6 +2872,8 @@ bool QuadExtractor::removeIsolatedFaces()
         m_remeshedPolygons = *std::max_element(quadsIslands.begin(), quadsIslands.end(), [&](const std::vector<std::vector<size_t>>& first, const std::vector<std::vector<size_t>>& second) {
             return first.size() < second.size();
         });
+        m_extractionStats.patchesKept = 1;
+        m_extractionStats.patchesDropped = quadsIslands.size() - 1;
         return true;
     }
     const auto patchArea = [this](const std::vector<std::vector<size_t>>& patch) {
@@ -2899,15 +2893,19 @@ bool QuadExtractor::removeIsolatedFaces()
     if (!(totalArea > 0.0))
         return false;
     std::vector<std::vector<size_t>> kept;
+    size_t keptPatches = 0;
     for (size_t i = 0; i < quadsIslands.size(); ++i) {
         if (areas[i] < m_islandAreaFraction * totalArea)
             continue;
+        ++keptPatches;
         for (const auto& face : quadsIslands[i])
             kept.push_back(face);
     }
     if (kept.empty())
         return false;
     m_remeshedPolygons = std::move(kept);
+    m_extractionStats.patchesKept = keptPatches;
+    m_extractionStats.patchesDropped = quadsIslands.size() - keptPatches;
     return true;
 }
 
@@ -3311,7 +3309,7 @@ void QuadExtractor::splitSixEdgeFaces()
             }
         }
         if (-1 == bestCorner) {
-            std::cerr << "Six edge face kept, no diagonal available" << std::endl;
+            Log::write(Log::Debug, "Six edge face kept, no diagonal available");
             polygons.push_back(face);
             continue;
         }
@@ -3327,7 +3325,7 @@ void QuadExtractor::splitSixEdgeFaces()
     if (0 == splitNum)
         return;
 
-    std::cerr << "Split six edge faces:" << splitNum << std::endl;
+    Log::write(Log::Debug, "Split six edge faces:" + std::to_string(splitNum));
     m_remeshedPolygons = std::move(polygons);
     rebuildHalfEdges();
 }
@@ -3585,7 +3583,7 @@ void QuadExtractor::convertTriangleAndFiveEdgeFans()
     if (0 == convertNum)
         return;
 
-    std::cerr << "Convert triangle and five edge fans:" << convertNum << std::endl;
+    Log::write(Log::Debug, "Convert triangle and five edge fans:" + std::to_string(convertNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(convertedVertices, 3, 5);
@@ -3986,7 +3984,7 @@ void QuadExtractor::collapseThreeValenceDiagonals()
             compactedCollapsedVertices.insert(newVertex);
     }
 
-    std::cerr << "Collapse three valence diagonals:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Collapse three valence diagonals:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     // The point in the middle came from the diagonal, not from the source mesh, pull
@@ -4152,7 +4150,7 @@ void QuadExtractor::mergeDoubleSharedEdgeQuads()
             compactedMergedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Merge double shared edge quads:" << mergeNum << std::endl;
+    Log::write(Log::Debug, "Merge double shared edge quads:" + std::to_string(mergeNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedMergedVertices, 3, 5);
@@ -4503,7 +4501,7 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
             compactedMergedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Merge three and five valence triangles:" << mergeNum << std::endl;
+    Log::write(Log::Debug, "Merge three and five valence triangles:" + std::to_string(mergeNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedMergedVertices, 3, 5);
@@ -4744,7 +4742,7 @@ void QuadExtractor::collapseThreeValenceCorners()
             compactedCollapsedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Collapse three valence corners:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Collapse three valence corners:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedCollapsedVertices, 3, 5);
@@ -5009,7 +5007,7 @@ void QuadExtractor::splitHighValenceTriangleFans()
     if (0 == splitNum)
         return;
 
-    std::cerr << "Split high valence triangle fans:" << splitNum << std::endl;
+    Log::write(Log::Debug, "Split high valence triangle fans:" + std::to_string(splitNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(splitVertices, 3, 5);
@@ -5305,7 +5303,7 @@ void QuadExtractor::collapseThreeValenceEdgePairs()
             compactedCollapsedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Collapse three valence edge pairs:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Collapse three valence edge pairs:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedCollapsedVertices, 3, 5);
@@ -5502,7 +5500,7 @@ void QuadExtractor::switchHighValenceEdges()
     if (0 == switchNum)
         return;
 
-    std::cerr << "Switch high valence edges:" << switchNum << std::endl;
+    Log::write(Log::Debug, "Switch high valence edges:" + std::to_string(switchNum));
     rebuildHalfEdges();
 
     // The switched quads kept their points, pull the reconnected patches back
@@ -5925,7 +5923,7 @@ void QuadExtractor::cleanupTriangles()
             compactedCollapsedVertices.insert(newVertex);
     }
 
-    std::cerr << "Cleanup triangle faces:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Cleanup triangle faces:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     // The rungs met halfway, pull the closed up strips back onto the source mesh
@@ -6018,7 +6016,7 @@ void QuadExtractor::splitSevenEdgeFaces()
             }
         }
         if (-1 == bestCorner) {
-            std::cerr << "Seven edge face kept, no diagonal available" << std::endl;
+            Log::write(Log::Debug, "Seven edge face kept, no diagonal available");
             polygons.push_back(face);
             continue;
         }
@@ -6034,7 +6032,7 @@ void QuadExtractor::splitSevenEdgeFaces()
     if (0 == splitNum)
         return;
 
-    std::cerr << "Split seven edge faces:" << splitNum << std::endl;
+    Log::write(Log::Debug, "Split seven edge faces:" + std::to_string(splitNum));
     m_remeshedPolygons = std::move(polygons);
     rebuildHalfEdges();
 }
@@ -6381,7 +6379,7 @@ void QuadExtractor::mergeSharedFiveEdgeFaces(const ProgressHandler* progressHand
             compactedMergedVertices.insert(newVertex);
     }
 
-    std::cerr << "Merge shared five edge faces:" << mergeCount << std::endl;
+    Log::write(Log::Debug, "Merge shared five edge faces:" + std::to_string(mergeCount));
     rebuildHalfEdges();
 
     // The two pentagons closed up around the merged point, pull the patch back

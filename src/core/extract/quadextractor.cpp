@@ -336,8 +336,14 @@ bool QuadExtractor::extract()
             Log::write(Log::Debug, "Local topology optimisation applied " + std::to_string(applied) + " operation(s), " + std::to_string(patches) + " patch(es)");
         rebuildHalfEdges();
     }
-    if (m_cleanDegenerate)
+    if (m_cleanDegenerate) {
         validateRemeshedMesh();
+        // After validate, never before: the clamp merges vertices itself, and it
+        // wants the mesh the validate pass already welded and de-duplicated, or it
+        // would chase zero length sides validate is about to remove anyway.
+        if (m_maximumAspect > 0.0)
+            clampQuadAspect(m_maximumAspect);
+    }
     report(1.0f, "");
 
     // A uv the passes could not follow is worth less than no uv at all: the
@@ -1433,20 +1439,27 @@ void QuadExtractor::fixHoles()
     size_t gradedFaces = 0;
     m_extractionStats.holesIgnored = 0; // this pass sees the holes still open
     searchBoundaries(orderedHalfEdges, &loops);
+    // The thresholds count target edges, not output edges: a hole is "long" when
+    // its perimeter is, so a mesh whose edges came out shorter than planned has to
+    // allow proportionally more of them before the same hole counts as long.  With
+    // no target stated the scale is exactly 1.0 and these stay the historical 8/65.
+    const double edgeScale = holeEdgeScale();
+    const double smallEdges = m_holeSmallEdges * edgeScale;
+    const double largeEdges = m_holeLargeEdges * edgeScale;
     for (auto& loop : loops) {
-        if (m_gradedHoleFilling && loop.size() > 8
-            && (loop.size() <= 65 || m_projectedHoleCaps)) {
+        if (m_gradedHoleFilling && (double)loop.size() > smallEdges
+            && ((double)loop.size() <= largeEdges || m_projectedHoleCaps)) {
             // The greedy quad pass gives up as soon as its best corner score is
             // non-positive, which is exactly what the large holes hit.  Seal them
             // by ear clipping instead; the triangle cleanup passes that run
             // afterwards pair the triangles into quads where they can.
             Log::write(Log::Debug, "Fixing hole (graded) at length:" + std::to_string(loop.size()));
-            const size_t added = fillHoleGraded(loop);
+            const size_t added = fillHoleGraded(loop, largeEdges);
             gradedFaces += added;
             recordFilledHole(added);
             continue;
         }
-        if (loop.size() > 65) {
+        if ((double)loop.size() > largeEdges) {
             Log::write(Log::Debug, "Ignore long hole at length:" + std::to_string(loop.size()));
             ++m_extractionStats.holesIgnored;
             continue;
@@ -1464,7 +1477,7 @@ void QuadExtractor::fixHoles()
     }
 }
 
-size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
+size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole, double largeHoleEdges)
 {
     if (hole.size() < 3)
         return 0;
@@ -1501,7 +1514,7 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
         perimeter += (m_remeshedVertices[polygon[i]] - m_remeshedVertices[polygon[(i + 1) % count]]).length();
     const double averageEdge = perimeter / (double)count;
 
-    const bool useProjectedRing = m_projectedHoleCaps && count > 65;
+    const bool useProjectedRing = m_projectedHoleCaps && (double)count > largeHoleEdges;
     const size_t firstNewVertex = m_remeshedVertices.size();
     if (useProjectedRing) {
         // Snap the apex and the mid ring onto the source surface: the input is
@@ -3255,6 +3268,412 @@ void QuadExtractor::validateRemeshedMesh()
         || m_extractionStats.degenerateFacesRemoved > 0
         || m_extractionStats.weldedVertices > 0) {
         Log::write(Log::Debug, "Validate: welded " + std::to_string(m_extractionStats.weldedVertices) + " vertex/vertices, removed " + std::to_string(m_extractionStats.degenerateFacesRemoved) + " degenerate and " + std::to_string(m_extractionStats.duplicateFacesRemoved) + " duplicate face(s)");
+    }
+}
+
+double QuadExtractor::remeshedMeanEdgeLength() const
+{
+    // Mean edge length rather than the bounding box diagonal: the hole thresholds
+    // count edges, so the unit they have to be expressed in is the length an edge of
+    // this output actually has.  A diagonal folds shape into the number (a long thin
+    // island would read as coarse) and gains nothing, because a uniformly scaled
+    // model scales this along with the target and the ratio cancels anyway.
+    std::unordered_set<std::pair<size_t, size_t>, EdgePairHash> seen;
+    double total = 0.0;
+    size_t edges = 0;
+    for (const auto& face : m_remeshedPolygons) {
+        const size_t count = face.size();
+        for (size_t i = 0; i < count; ++i) {
+            const size_t first = face[i];
+            const size_t second = face[(i + 1) % count];
+            if (first >= m_remeshedVertices.size() || second >= m_remeshedVertices.size())
+                continue;
+            const auto edge = first < second ? std::make_pair(first, second)
+                                             : std::make_pair(second, first);
+            if (!seen.insert(edge).second)
+                continue;
+            total += (m_remeshedVertices[first] - m_remeshedVertices[second]).length();
+            ++edges;
+        }
+    }
+    if (0 == edges)
+        return 0.0;
+    return total / (double)edges;
+}
+
+double QuadExtractor::holeEdgeScale() const
+{
+    if (!(m_holeTargetEdgeLength > 0.0))
+        return 1.0;
+    const double measured = remeshedMeanEdgeLength();
+    if (!(measured > 0.0))
+        return 1.0;
+    // Output edges twice as long as planned make the same hole half as many of
+    // them, so the count threshold has to shrink by the same factor to keep meaning
+    // the same perimeter.
+    return m_holeTargetEdgeLength / measured;
+}
+
+void QuadExtractor::clampQuadAspect(double maximumAspect)
+{
+    if (!(maximumAspect > 0.0))
+        return;
+    if (m_remeshedVertices.empty() || m_remeshedPolygons.empty())
+        return;
+
+    double diagonal = 0.0;
+    {
+        Vector3 minimum = m_remeshedVertices[0];
+        Vector3 maximum = minimum;
+        for (const auto& vertex : m_remeshedVertices) {
+            for (int i = 0; i < 3; ++i) {
+                minimum[i] = std::min(minimum[i], vertex[i]);
+                maximum[i] = std::max(maximum[i], vertex[i]);
+            }
+        }
+        diagonal = (maximum - minimum).length();
+    }
+    if (!(diagonal > 0.0))
+        diagonal = 1.0;
+    // The same floor validateRemeshedMesh() accepted this mesh against: a collapse
+    // that flattens a face has to drop it, because a flat polygon is what the next
+    // measurement reads as a zero length edge.
+    const double minimumArea = 1e-14 * diagonal * diagonal;
+    const double infiniteAspect = std::numeric_limits<double>::max();
+
+    // A side of zero length is an aspect this pass exists to fix, not a ratio to
+    // divide by, so it reports the worst possible aspect instead.
+    const auto measureAspect = [this, infiniteAspect](const std::vector<size_t>& face,
+                                   double* longestSide, size_t* longestSideIndex) {
+        double shortestSide = infiniteAspect;
+        *longestSide = 0.0;
+        *longestSideIndex = 0;
+        const size_t count = face.size();
+        for (size_t i = 0; i < count; ++i) {
+            const double length = (m_remeshedVertices[face[i]] - m_remeshedVertices[face[(i + 1) % count]]).length();
+            if (length > *longestSide) {
+                *longestSide = length;
+                *longestSideIndex = i;
+            }
+            if (length < shortestSide)
+                shortestSide = length;
+        }
+        if (count < 3 || !(shortestSide > 0.0) || !(*longestSide > 0.0))
+            return infiniteAspect;
+        return *longestSide / shortestSide;
+    };
+
+    const auto faceArea = [this](const std::vector<size_t>& face) {
+        if (face.size() < 3)
+            return 0.0;
+        for (const auto index : face) {
+            if (index >= m_remeshedVertices.size())
+                return 0.0;
+        }
+        const Vector3& origin = m_remeshedVertices[face[0]];
+        Vector3 sum;
+        for (size_t i = 1; i + 1 < face.size(); ++i) {
+            sum = sum + Vector3::crossProduct(m_remeshedVertices[face[i]] - origin, m_remeshedVertices[face[i + 1]] - origin);
+        }
+        return 0.5 * sum.length();
+    };
+
+    // A quad collapsed along one side is a triangle, so the renumbering keeps the
+    // face and only the corners that became each other go.  distinct is the count of
+    // different indices left: below three there is no face, and a repeated non
+    // neighbouring corner is not a polygon either, so both are judged here.
+    const auto collapseFace = [](const std::vector<size_t>& source, size_t gone, size_t survivor,
+                                  std::vector<size_t>* mapped, size_t* distinct) {
+        mapped->clear();
+        mapped->reserve(source.size());
+        for (const auto vertex : source) {
+            const size_t renamed = vertex == gone ? survivor : vertex;
+            if (!mapped->empty() && mapped->back() == renamed)
+                continue;
+            mapped->push_back(renamed);
+        }
+        if (mapped->size() > 1 && mapped->front() == mapped->back())
+            mapped->pop_back();
+        std::vector<size_t> sorted(*mapped);
+        std::sort(sorted.begin(), sorted.end());
+        *distinct = (size_t)(std::unique(sorted.begin(), sorted.end()) - sorted.begin());
+    };
+
+    const auto keepsFace = [](size_t distinct, const std::vector<size_t>& mapped) {
+        return distinct >= 3 && distinct == mapped.size();
+    };
+
+    // Signed change per undirected edge, in edge *occurrences*: a face whose two
+    // corners collapse onto the same pair contributes twice, which is exactly what
+    // the count downstream will see.
+    const auto accumulateEdges = [](const std::vector<size_t>& polygon, long long amount,
+                                     std::map<std::pair<size_t, size_t>, long long>* delta) {
+        const size_t count = polygon.size();
+        if (count < 3)
+            return;
+        for (size_t i = 0; i < count; ++i) {
+            const size_t first = polygon[i];
+            const size_t second = polygon[(i + 1) % count];
+            if (first == second)
+                continue;
+            (*delta)[first < second ? std::make_pair(first, second)
+                                    : std::make_pair(second, first)]
+                += amount;
+        }
+    };
+
+    const auto compactVertices = [this]() {
+        std::set<size_t> usedVertices;
+        for (const auto& face : m_remeshedPolygons) {
+            for (const auto index : face)
+                usedVertices.insert(index);
+        }
+        if (usedVertices.size() >= m_remeshedVertices.size())
+            return;
+        std::unordered_map<size_t, size_t> oldToNew;
+        compactRemeshedVerticesAscending(usedVertices, &oldToNew);
+        for (auto& face : m_remeshedPolygons) {
+            for (auto& index : face) {
+                auto found = oldToNew.find(index);
+                if (oldToNew.end() != found)
+                    index = found->second;
+            }
+        }
+    };
+
+    // Four rounds because one collapse fixes one side of one face and a quad only
+    // needs merging again when a neighbour's collapse just made it long: past the
+    // second round the mesh is already under the threshold or a face is a triangle
+    // the loop no longer looks at.
+    for (size_t round = 0; round < 4; ++round) {
+        // Undirected use per edge, and the faces around every vertex: a collapse
+        // renumbers one vertex in every face that named it, so the change set of a
+        // candidate is exactly facesAroundVertex[gone] and nothing else moves.
+        std::unordered_map<std::pair<size_t, size_t>, size_t, EdgePairHash> edgeUse;
+        edgeUse.reserve(m_remeshedPolygons.size() * 2);
+        std::vector<std::vector<size_t>> facesAroundVertex(m_remeshedVertices.size());
+        std::vector<char> dropped(m_remeshedPolygons.size(), 0);
+        for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
+            const auto& face = m_remeshedPolygons[faceIndex];
+            const size_t count = face.size();
+            bool usable = count >= 3;
+            for (const auto vertex : face) {
+                if (vertex >= m_remeshedVertices.size()) {
+                    usable = false;
+                    break;
+                }
+            }
+            if (!usable) {
+                dropped[faceIndex] = 1;
+                ++m_extractionStats.degenerateFacesRemoved;
+                continue;
+            }
+            for (size_t i = 0; i < count; ++i) {
+                const size_t first = face[i];
+                const size_t second = face[(i + 1) % count];
+                ++edgeUse[first < second ? std::make_pair(first, second)
+                                         : std::make_pair(second, first)];
+                facesAroundVertex[first].push_back(faceIndex);
+            }
+        }
+
+        const auto attachFace = [&facesAroundVertex](size_t vertex, size_t faceIndex) {
+            auto& bucket = facesAroundVertex[vertex];
+            if (bucket.end() == std::find(bucket.begin(), bucket.end(), faceIndex))
+                bucket.push_back(faceIndex);
+        };
+
+        std::vector<size_t> listed(m_remeshedPolygons.size(), 0);
+        size_t listStamp = 0;
+        std::vector<size_t> affected;
+        std::map<std::pair<size_t, size_t>, long long> delta;
+        size_t merged = 0;
+        for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
+            if (dropped[faceIndex])
+                continue;
+            const std::vector<size_t> face = m_remeshedPolygons[faceIndex];
+            if (4 != face.size())
+                continue;
+            // A face that already names a corner twice has no side to merge along:
+            // validate leaves none of those behind, and guessing at one here would
+            // delete a face the caller never asked about.
+            {
+                std::vector<size_t> corners(face);
+                std::sort(corners.begin(), corners.end());
+                if (std::adjacent_find(corners.begin(), corners.end()) != corners.end())
+                    continue;
+            }
+            double longestSide = 0.0;
+            size_t longestSideIndex = 0;
+            if (!(measureAspect(face, &longestSide, &longestSideIndex) > maximumAspect))
+                continue;
+
+            // Merge along the *shortest* side.  A needle is two long sides and two
+            // nearly zero ones: collapsing the long side leaves the needle (and its
+            // aspect), while collapsing a zero side turns it into a triangle and
+            // removes the defect.  For a quad that is merely long and thin, the
+            // short side is still the one whose loss shortens the ratio.
+            double shortestSide = std::numeric_limits<double>::max();
+            size_t shortestSideIndex = longestSideIndex;
+            for (size_t i = 0; i < 4; ++i) {
+                const double length = (m_remeshedVertices[face[i]] - m_remeshedVertices[face[(i + 1) % 4]]).length();
+                if (length < shortestSide) {
+                    shortestSide = length;
+                    shortestSideIndex = i;
+                }
+            }
+
+            const size_t first = face[shortestSideIndex];
+            const size_t second = face[(shortestSideIndex + 1) % 4];
+            const size_t survivor = first < second ? first : second;
+            const size_t gone = first < second ? second : first;
+            if (survivor == gone)
+                continue;
+
+            ++listStamp;
+            affected.clear();
+            for (const size_t other : facesAroundVertex[gone]) {
+                // A face an earlier collapse of this round dropped is still listed
+                // here and its edges are already out of the count, so letting it in
+                // would subtract them twice.
+                if (dropped[other] || listed[other] == listStamp)
+                    continue;
+                listed[other] = listStamp;
+                affected.push_back(other);
+            }
+            // The table is rebuilt once per round and a previous merge in this round
+            // moved faces onto the survivor, so the candidate itself has to be
+            // present even if the table lost it.
+            if (listed[faceIndex] != listStamp) {
+                listed[faceIndex] = listStamp;
+                affected.push_back(faceIndex);
+            }
+
+            delta.clear();
+            for (const size_t other : affected) {
+                std::vector<size_t> mapped;
+                size_t distinct = 0;
+                collapseFace(m_remeshedPolygons[other], gone, survivor, &mapped, &distinct);
+                accumulateEdges(m_remeshedPolygons[other], -1, &delta);
+                if (keepsFace(distinct, mapped))
+                    accumulateEdges(mapped, 1, &delta);
+            }
+            bool rejected = false;
+            for (const auto& it : delta) {
+                if (it.second <= 0)
+                    continue;
+                auto found = edgeUse.find(it.first);
+                const long long total = it.second
+                    + (long long)(edgeUse.end() == found ? 0 : found->second);
+                if (total > 2) {
+                    rejected = true;
+                    break;
+                }
+            }
+            // Leaving this face long is the cheaper failure: an edge with three
+            // faces is exactly what the caller's own measurement reports as
+            // non-manifold output, and that is the defect this pass must not create.
+            if (rejected) {
+                ++m_extractionStats.aspectRejectedFaces;
+                continue;
+            }
+
+            // The midpoint is on the surface between the two ends, so the survivor
+            // stays on it instead of dragging its neighbourhood to one side.
+            m_remeshedVertices[survivor] = (m_remeshedVertices[survivor] + m_remeshedVertices[gone]) * 0.5;
+            setRemeshedVertexUv(survivor, (remeshedVertexUv(survivor) + remeshedVertexUv(gone)) * 0.5);
+            ++m_extractionStats.aspectClampedEdges;
+            ++merged;
+
+            for (const size_t other : affected) {
+                const std::vector<size_t> before = m_remeshedPolygons[other];
+                std::vector<size_t> mapped;
+                size_t distinct = 0;
+                collapseFace(before, gone, survivor, &mapped, &distinct);
+                const size_t count = before.size();
+                for (size_t i = 0; i < count; ++i) {
+                    const size_t a = before[i];
+                    const size_t b = before[(i + 1) % count];
+                    auto found = edgeUse.find(a < b ? std::make_pair(a, b) : std::make_pair(b, a));
+                    if (edgeUse.end() != found && found->second > 0)
+                        --found->second;
+                }
+                if (keepsFace(distinct, mapped) && faceArea(mapped) > minimumArea) {
+                    const size_t mappedCount = mapped.size();
+                    for (size_t i = 0; i < mappedCount; ++i) {
+                        const size_t a = mapped[i];
+                        const size_t b = mapped[(i + 1) % mappedCount];
+                        ++edgeUse[a < b ? std::make_pair(a, b) : std::make_pair(b, a)];
+                        attachFace(a, other);
+                    }
+                    m_remeshedPolygons[other] = std::move(mapped);
+                } else {
+                    dropped[other] = 1;
+                    ++m_extractionStats.degenerateFacesRemoved;
+                }
+                if (other == faceIndex)
+                    ++m_extractionStats.aspectClampedFaces;
+            }
+        }
+
+        bool removedAny = false;
+        for (const char flag : dropped) {
+            if (!flag)
+                continue;
+            removedAny = true;
+            break;
+        }
+        if (removedAny) {
+            std::vector<std::vector<size_t>> kept;
+            kept.reserve(m_remeshedPolygons.size());
+            for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
+                if (dropped[faceIndex])
+                    continue;
+                kept.push_back(std::move(m_remeshedPolygons[faceIndex]));
+            }
+            m_remeshedPolygons = std::move(kept);
+        }
+        if (0 == merged && !removedAny)
+            break;
+        // The absorbed vertices are unreferenced now; compacting per round keeps the
+        // position and uv arrays from carrying them into the next round's tables.
+        compactVertices();
+        rebuildHalfEdges();
+    }
+
+    // A collapse can leave two faces reading the same corner list: the pair still
+    // counts as two faces per shared edge, but a caller comparing faces sees a
+    // duplicate, and the validate pass already decided a duplicate is worth removing.
+    if (m_extractionStats.aspectClampedEdges > 0) {
+        std::set<std::vector<size_t>> keptFaces;
+        std::vector<std::vector<size_t>> kept;
+        kept.reserve(m_remeshedPolygons.size());
+        for (auto& face : m_remeshedPolygons) {
+            std::vector<size_t> key(face);
+            std::sort(key.begin(), key.end());
+            if (!keptFaces.insert(key).second) {
+                ++m_extractionStats.duplicateFacesRemoved;
+                continue;
+            }
+            kept.push_back(std::move(face));
+        }
+        m_remeshedPolygons = std::move(kept);
+        compactVertices();
+        rebuildHalfEdges();
+    }
+
+    size_t tooLong = 0;
+    for (const auto& face : m_remeshedPolygons) {
+        if (4 != face.size())
+            continue;
+        double longestSide = 0.0;
+        size_t longestSideIndex = 0;
+        if (measureAspect(face, &longestSide, &longestSideIndex) > maximumAspect)
+            ++tooLong;
+    }
+    m_extractionStats.facesTooLongRemaining = tooLong;
+    if (m_extractionStats.aspectClampedEdges > 0 || tooLong > 0) {
+        Log::write(Log::Debug, "Aspect clamp: " + std::to_string(m_extractionStats.aspectClampedEdges) + " collapse(s) on " + std::to_string(m_extractionStats.aspectClampedFaces) + " face(s), " + std::to_string(m_extractionStats.aspectRejectedFaces) + " rejected, " + std::to_string(tooLong) + " quad(s) still over " + std::to_string(maximumAspect));
     }
 }
 

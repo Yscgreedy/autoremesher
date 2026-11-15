@@ -113,6 +113,9 @@ func TestManagerHappyPath(t *testing.T) {
 	if snap.Result == nil || snap.Result.Quads == 0 {
 		t.Fatalf("snapshot result missing: %+v", snap.Result)
 	}
+	if snap.Result.Deviation == nil || snap.Result.Deviation.Samples == 0 {
+		t.Fatalf("snapshot deviation missing: %+v", snap.Result.Deviation)
+	}
 	if snap.Progress != 1 {
 		t.Fatalf("progress = %v, want 1", snap.Progress)
 	}
@@ -252,7 +255,7 @@ func TestParamsArgs(t *testing.T) {
 		"--sharp-edge 60",
 		"--threads 8",
 		"--model-type hard-surface",
-		"--local-remesh", "--weld-patches",
+		"--local-remesh", "--weld-patches", "--deviation",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("argv missing %q: %s", want, joined)

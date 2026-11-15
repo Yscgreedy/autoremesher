@@ -21,6 +21,8 @@
  */
 #include <unordered_map>
 #include <algorithm>
+#include <cstdlib>
+#include <iostream>
 #include "isotropichalfedgemesh.h"
 
 namespace {
@@ -109,7 +111,12 @@ IsotropicHalfedgeMesh::IsotropicHalfedgeMesh(const std::vector<Vector3> &vertice
             
             auto insertResult = halfedgeMap.insert({makeHalfedgeKey(first, second), halfedge});
             if (!insertResult.second) {
-                std::cerr << "Found repeated halfedge:" << first << "," << second << std::endl;
+                // A duplicate half edge means the source had coincident vertices.
+                // This used to print on every run, which made --quiet a lie and
+                // buried the real diagnostics; keep it behind an env switch.
+                static const bool debugHalfedge = nullptr != std::getenv("AR_DEBUG_HALFEDGE");
+                if (debugHalfedge)
+                    std::cerr << "Found repeated halfedge:" << first << "," << second << std::endl;
             }
         }
         linkFaceHalfedges(halfedges);

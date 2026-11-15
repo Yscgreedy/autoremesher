@@ -24,6 +24,9 @@
 #include <AutoRemesher/MeshSeparator>
 #include <AutoRemesher/Parameterizer>
 #include <AutoRemesher/QuadExtractor>
+#include <AutoRemesher/UvCharts>
+#include <AutoRemesher/UvTransfer>
+#include <core/base/logging.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -31,8 +34,11 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <queue>
 #include <sstream>
 // Qt defines `emit` as a macro, which collides with TBB profiling.h's `void emit()`.
@@ -503,13 +509,21 @@ void AutoRemesher::updateProgress(size_t threadIndex, float progress, const char
     m_reportedStatus = islandStatus;
 
     // With several islands in flight, the run as a whole is only as far along as
-    // its slowest island, so that is the step worth naming.
-    size_t slowest = threadIndex;
-    for (size_t i = 0; i < m_threadProgress.size(); ++i) {
-        if (m_threadProgress[i] < m_threadProgress[slowest])
-            slowest = i;
+    // its slowest island, so that is the step worth naming.  Finding it costs a
+    // scan over every island, and a 17,958 island model reports hundreds of
+    // thousands of times, so the scan is rate limited: the percentage is always
+    // exact, only the label can lag by a frame.
+    const auto now = std::chrono::steady_clock::now();
+    if (m_slowestIsland == m_threadProgress.size()
+        || now - m_lastSlowestScan >= std::chrono::milliseconds(20)) {
+        m_lastSlowestScan = now;
+        m_slowestIsland = threadIndex;
+        for (size_t i = 0; i < m_threadProgress.size(); ++i) {
+            if (m_threadProgress[i] < m_threadProgress[m_slowestIsland])
+                m_slowestIsland = i;
+        }
     }
-    const char* name = m_threadStatus[slowest];
+    const char* name = m_threadStatus[m_slowestIsland];
     m_progressHandler(m_tag, (float)overall, nullptr != name ? name : "");
 }
 
@@ -557,12 +571,19 @@ bool AutoRemesher::remesh()
     else if (0 == m_targetTriangleCount)
         invalidInputReason = "target triangle count must be greater than zero";
     if (nullptr != invalidInputReason) {
-        std::cerr << "Invalid remesh input: " << invalidInputReason << std::endl;
+        m_lastError = invalidInputReason;
+        Log::write(Log::Normal, std::string("Invalid remesh input: ") + invalidInputReason + "\n");
         if (nullptr != m_progressHandler)
             m_progressHandler(m_tag, 1.0, invalidInputReason);
         return false;
     }
     auto t_start = std::chrono::high_resolution_clock::now();
+
+    // Describe the mesh before touching it.  Boundary edges, non-manifold edges,
+    // isolated shells and degenerate faces are exactly what makes a remesh go
+    // wrong quietly, so they are counted here and reported by the application
+    // instead of being discovered in Blender afterwards.
+    analyzeInput();
 
     // Each label names the step that is about to run, not the one that just
     // finished, so the status line matches what the process is actually doing.
@@ -579,8 +600,10 @@ bool AutoRemesher::remesh()
     MeshSeparator::splitToIslands(m_triangles, trianglesIslands);
     auto t_afterSplit = std::chrono::high_resolution_clock::now();
 
+    m_islandCount = trianglesIslands.size();
+
     if (trianglesIslands.empty()) {
-        std::cerr << "Input mesh is empty" << std::endl;
+        m_lastError = "input mesh produced no islands";
         if (nullptr != m_progressHandler)
             m_progressHandler(m_tag, 1.0, "Input mesh is empty");
         return false;
@@ -846,13 +869,17 @@ bool AutoRemesher::remesh()
                     // A pathological island must not abort the whole remesh,
                     // so log the parameterizer failure and skip its quads.
                     parameterizeSucceeded = false;
-                    std::cerr << "Island " << (thread.islandIndex + 1)
-                              << ": parameterization failed (" << e.what()
-                              << "), skipping this island." << std::endl;
+                    std::ostringstream message;
+                    message << "Island " << (thread.islandIndex + 1)
+                            << ": parameterization failed (" << e.what()
+                            << "), skipping this island.\n";
+                    Log::write(Log::Normal, message.str());
                 } catch (...) {
                     parameterizeSucceeded = false;
-                    std::cerr << "Island " << (thread.islandIndex + 1)
-                              << ": parameterization failed (unknown error), skipping this island." << std::endl;
+                    std::ostringstream message;
+                    message << "Island " << (thread.islandIndex + 1)
+                            << ": parameterization failed (unknown error), skipping this island.\n";
+                    Log::write(Log::Normal, message.str());
                 }
 
                 auto t1 = std::chrono::high_resolution_clock::now();
@@ -963,6 +990,73 @@ bool AutoRemesher::remesh()
             thread.capturedExtractedConnectionMoved.end());
         m_isotropicExtractedConnectionMoved.resize(m_isotropicExtractedConnections.size(), 0);
     }
+    // Signed area of a face in UV space; also the guard that keeps a degenerate
+    // chart from collapsing a face.
+    const auto polygonUvArea = [](const std::vector<Vector2>& faceUvs) {
+        double area = 0.0;
+        for (size_t i = 0; i < faceUvs.size(); ++i) {
+            const Vector2& current = faceUvs[i];
+            const Vector2& next = faceUvs[(i + 1) % faceUvs.size()];
+            area += current.x() * next.y() - next.x() * current.y();
+        }
+        return 0.5 * area;
+    };
+    // Safety net for a face whose chart is unusable: project it onto its own
+    // tangent plane.  Scale is local to the face, so such faces do not tile with
+    // the chart, but they are usable instead of zero-area.
+    const auto planarFaceUvs = [](const std::vector<Vector3>& vertices, const std::vector<size_t>& face) -> std::vector<Vector2> {
+        std::vector<Vector2> result;
+        if (face.size() < 3)
+            return result;
+        Vector3 origin = vertices[face[0]];
+        Vector3 normal;
+        for (size_t i = 0; i < face.size(); ++i) {
+            const Vector3& current = vertices[face[i]];
+            const Vector3& following = vertices[face[(i + 1) % face.size()]];
+            normal = normal + Vector3((current.y() - following.y()) * (current.z() + following.z()),
+                                      (current.z() - following.z()) * (current.x() + following.x()),
+                                      (current.x() - following.x()) * (current.y() + following.y()));
+        }
+        if (!(normal.lengthSquared() > 0.0))
+            return result;
+        normal = normal.normalized();
+        Vector3 axisU = vertices[face[1]] - origin;
+        if (!(axisU.lengthSquared() > 0.0))
+            return result;
+        axisU = axisU.normalized();
+        const Vector3 axisV = Vector3::crossProduct(normal, axisU);
+        result.reserve(face.size());
+        for (const size_t corner : face) {
+            const Vector3 relative = vertices[corner] - origin;
+            result.push_back(Vector2(Vector3::dotProduct(relative, axisU),
+                Vector3::dotProduct(relative, axisV)));
+        }
+        return result;
+    };
+
+    m_remeshedFaceUvs.clear();
+    m_remeshedVertexUvs.clear();
+    double uvCursor = 0.0;
+    bool uvsComplete = m_exportUvs;
+
+    // Both UV channels are produced: the extractor's per-vertex UVs (continuous
+    // across any face that shares a vertex) and the per-face chart transfer
+    // (correct where corners come from different charts of the cover).  The writer
+    // picks per face, so a seam only exists where the cover really has one.
+    bool vertexUvsPossible = m_exportUvs;
+    if (vertexUvsPossible) {
+        for (const auto& thread : parameterizationThreads) {
+            if (nullptr == thread.remesher || thread.remesher->remeshedQuads().empty())
+                continue;
+            const std::vector<Vector2>& vertexUvs = thread.remesher->remeshedVertexUvs();
+            if (vertexUvs.empty() || vertexUvs.size() != thread.remesher->remeshedVertices().size()) {
+                vertexUvsPossible = false;
+                break;
+            }
+        }
+    }
+    bool vertexUvsComplete = vertexUvsPossible;
+
     for (size_t i = 0; i < parameterizationThreads.size(); ++i) {
         auto& thread = parameterizationThreads[i];
         if (nullptr == thread.remesher)
@@ -971,19 +1065,242 @@ bool AutoRemesher::remesh()
         if (quads.empty())
             continue;
         const auto& vertices = thread.remesher->remeshedVertices();
+
+        std::vector<Vector2> islandVertexUvs;
+        if (vertexUvsPossible) {
+            islandVertexUvs = thread.remesher->remeshedVertexUvs();
+            if (islandVertexUvs.size() != vertices.size())
+                vertexUvsComplete = false;
+        }
+
+        std::vector<std::vector<Vector2>> islandFaceUvs;
+        bool islandUvsOk = false;
+        if (m_exportUvs && !thread.capturedUvs.empty()
+            && thread.capturedUvs.size() == thread.island->triangles.size()
+            && !thread.island->vertices.empty()) {
+            UvTransfer transfer(thread.island->vertices, thread.island->triangles, thread.capturedUvs);
+            if (transfer.valid()) {
+                // (the fallback for an island without a usable transfer is the
+                // extractor's per-vertex UVs, handled below by the caller)
+                islandUvsOk = true;
+                islandFaceUvs.reserve(quads.size());
+                for (const auto& quad : quads) {
+                    if (quad.size() < 3) {
+                        islandUvsOk = false;
+                        break;
+                    }
+                    Vector3 centroid;
+                    for (const size_t corner : quad)
+                        centroid = centroid + vertices[corner];
+                    centroid = centroid * (1.0 / (double)quad.size());
+                    size_t triangleIndex = 0;
+                    if (!transfer.locateTriangle(centroid, &triangleIndex)) {
+                        islandUvsOk = false;
+                        break;
+                    }
+                    std::vector<Vector2> cornerUvs;
+                    cornerUvs.reserve(quad.size());
+                    for (const size_t corner : quad) {
+                        Vector2 uv;
+                        if (!transfer.evaluate(vertices[corner], triangleIndex, &uv)) {
+                            islandUvsOk = false;
+                            break;
+                        }
+                        cornerUvs.push_back(uv);
+                    }
+                    if (!islandUvsOk)
+                        break;
+                    // A degenerate chart (a collapsed or zero-area triangle in the
+                    // parameterization) would collapse the face in UV space, so
+                    // that face falls back to its own planar frame.
+                    if (!(std::fabs(polygonUvArea(cornerUvs)) > 0.0)) {
+                        // A degenerate chart on one face must not cost the whole run
+                        // its UVs: try the face's own plane, and if even that is
+                        // impossible keep the chart values rather than failing.
+                        const std::vector<Vector2> planar = planarFaceUvs(vertices, quad);
+                        if (!planar.empty())
+                            cornerUvs = planar;
+                    }
+                    islandFaceUvs.push_back(cornerUvs);
+                }
+            }
+        }
+
+        // Chart-driven seam splitting: one vertex cannot carry two UVs, so the
+        // mesh is cut where the cover changes chart.  Faces inside a chart keep
+        // sharing vertices; only the seam duplicates them.
+        std::vector<Vector3> splitVertices;
+        std::vector<std::vector<size_t>> splitFaces;
+        const std::vector<Vector3>* meshVertices = &vertices;
+        const std::vector<std::vector<size_t>>* meshFaces = &quads;
+        bool splitDone = false;
+        // The symmetry pass cuts and re-welds the mesh; splitting first would leave
+        // the cut row with duplicated vertices that the weld then collapses into
+        // open edges.  Symmetry wins, the UVs stay per-vertex.
+        if (m_exportUvs && m_uvSeamSplitting && m_symmetryAxis == 0 && islandUvsOk
+            && islandFaceUvs.size() == quads.size() && !quads.empty()) {
+            // The per-face UVs come from the cover; the split decision is made by
+            // comparing them on shared edges.  The solver's own chart ids
+            // (Parameterizer::triangleCharts) are exposed for a future extractor
+            // that tags each cross point with its chart; on their own they do not
+            // match the per-triangle integer branches the isolines use here.
+            ChartSplit split = splitAtChartSeams(vertices, quads, islandFaceUvs);
+            if (split.faces.size() == quads.size()
+                && split.vertexUvs.size() == split.vertices.size() && !split.vertices.empty()) {
+                splitVertices = std::move(split.vertices);
+                splitFaces = std::move(split.faces);
+                islandVertexUvs = std::move(split.vertexUvs);
+                vertexUvsComplete = true;
+                meshVertices = &splitVertices;
+                meshFaces = &splitFaces;
+                splitDone = true;
+            }
+        }
+
+        // One stripe per island in UV space: their cover solves are independent.
+        double minU = 0.0;
+        double maxU = 0.0;
+        double minV = 0.0;
+        double maxV = 0.0;
+        bool haveUv = false;
+        const auto consider = [&](const Vector2& uv) {
+            minU = haveUv ? std::min(minU, uv.x()) : uv.x();
+            maxU = haveUv ? std::max(maxU, uv.x()) : uv.x();
+            minV = haveUv ? std::min(minV, uv.y()) : uv.y();
+            maxV = haveUv ? std::max(maxV, uv.y()) : uv.y();
+            haveUv = true;
+        };
+        if (vertexUvsComplete) {
+            for (const auto& uv : islandVertexUvs)
+                consider(uv);
+        }
+        if (islandUvsOk) {
+            for (const auto& faceUvs : islandFaceUvs)
+                for (const auto& uv : faceUvs)
+                    consider(uv);
+        }
+        double shiftU = 0.0;
+        double shiftV = 0.0;
+        if (haveUv) {
+            shiftU = uvCursor - minU;
+            shiftV = -minV;
+            uvCursor += (maxU - minU) * 1.1 + 1e-6;
+        }
+        if (vertexUvsComplete) {
+            for (auto& uv : islandVertexUvs) {
+                uv.setX(uv.x() + shiftU);
+                uv.setY(uv.y() + shiftV);
+            }
+        }
+        if (islandUvsOk) {
+            for (auto& faceUvs : islandFaceUvs) {
+                for (auto& uv : faceUvs) {
+                    uv.setX(uv.x() + shiftU);
+                    uv.setY(uv.y() + shiftV);
+                }
+            }
+        }
+
         size_t vertexStartIndex = m_remeshedVertices.size();
-        m_remeshedVertices.reserve(m_remeshedVertices.size() + vertices.size());
-        for (const auto& it : vertices) {
+        m_remeshedVertices.reserve(m_remeshedVertices.size() + meshVertices->size());
+        for (const auto& it : *meshVertices) {
             m_remeshedVertices.push_back(it);
         }
-        for (const auto& it : quads) {
+        for (const auto& it : *meshFaces) {
             std::vector<size_t> quad;
             quad.reserve(it.size());
             for (const auto& v : it)
                 quad.push_back(vertexStartIndex + v);
             m_remeshedQuads.push_back(quad);
         }
+        if (vertexUvsComplete && islandVertexUvs.size() == meshVertices->size()) {
+            m_remeshedVertexUvs.insert(m_remeshedVertexUvs.end(),
+                islandVertexUvs.begin(), islandVertexUvs.end());
+        }
+        if (islandUvsOk && islandFaceUvs.size() == quads.size()) {
+            for (const auto& faceUvs : islandFaceUvs)
+                m_remeshedFaceUvs.push_back(faceUvs);
+        }
+        if (m_exportUvs && !islandUvsOk)
+            uvsComplete = false;
     }
+
+    if (!vertexUvsComplete || m_remeshedVertexUvs.size() != m_remeshedVertices.size())
+        m_remeshedVertexUvs.clear();
+
+    if (!uvsComplete || (m_exportUvs && m_remeshedFaceUvs.size() != m_remeshedQuads.size())) {
+        m_remeshedVertexUvs.clear();
+        m_remeshedFaceUvs.clear();
+    } else {
+        // One normalization for both channels, so a face that falls back to the
+        // per-corner chart still lands on the same UV scale as its neighbours.
+        bool haveUv = false;
+        double minU = 0.0;
+        double maxU = 0.0;
+        double minV = 0.0;
+        double maxV = 0.0;
+        const auto consider = [&](const Vector2& uv) {
+            minU = haveUv ? std::min(minU, uv.x()) : uv.x();
+            maxU = haveUv ? std::max(maxU, uv.x()) : uv.x();
+            minV = haveUv ? std::min(minV, uv.y()) : uv.y();
+            maxV = haveUv ? std::max(maxV, uv.y()) : uv.y();
+            haveUv = true;
+        };
+        for (const auto& uv : m_remeshedVertexUvs)
+            consider(uv);
+        for (const auto& faceUvs : m_remeshedFaceUvs)
+            for (const auto& uv : faceUvs)
+                consider(uv);
+        const double extent = haveUv ? std::max(maxU - minU, maxV - minV) : 0.0;
+        if (extent > 0.0) {
+            const auto normalize = [&](Vector2* uv) {
+                uv->setX((uv->x() - minU) / extent);
+                uv->setY((uv->y() - minV) / extent);
+            };
+            for (auto& uv : m_remeshedVertexUvs)
+                normalize(&uv);
+            for (auto& faceUvs : m_remeshedFaceUvs)
+                for (auto& uv : faceUvs)
+                    normalize(&uv);
+        }
+    }
+
+    // Symmetry is applied last, on the merged mesh: the cut and the mirror have to
+    // see the whole model, not one island at a time.
+    if (m_symmetryAxis >= 1 && m_symmetryAxis <= 3) {
+        SymmetryResult mirrored = mirrorSymmetrize(m_remeshedVertices, m_remeshedQuads,
+            m_remeshedFaceUvs, m_remeshedVertexUvs,
+            m_symmetryAxis, m_symmetryPlane, m_symmetryTolerance);
+        m_symmetryStats = mirrored.stats;
+        m_remeshedVertices = std::move(mirrored.vertices);
+        m_remeshedQuads = std::move(mirrored.faces);
+        m_remeshedFaceUvs = std::move(mirrored.faceUvs);
+        m_remeshedVertexUvs = std::move(mirrored.vertexUvs);
+    } else {
+        m_symmetryStats = SymmetryStats();
+    }
+
+    m_deviation = DeviationStats();
+    if (m_measureDeviation)
+        m_deviation = measureDeviation(m_remeshedVertices, m_vertices, m_triangles);
+
+    // Hole filling and patch selection used to be silent decisions made deep in
+    // the extractor.  Sum what each island actually did so the caller can say
+    // "3 holes filled, 1 left open, 2 patches dropped" instead of leaving the
+    // user to count boundary edges in another tool.
+    m_holeStats = HoleStats();
+    m_patchStats = PatchStats();
+    for (const auto& thread : parameterizationThreads) {
+        if (nullptr == thread.remesher)
+            continue;
+        const QuadExtractor::ExtractionStats& stats = thread.remesher->extractionStats();
+        m_holeStats.filled += stats.holesFilled;
+        m_holeStats.ignored += stats.holesIgnored;
+        m_holeStats.facesAdded += stats.holeFacesAdded;
+        m_patchStats.kept += stats.patchesKept;
+        m_patchStats.dropped += stats.patchesDropped;
+    }
+    m_outputStats = analyzeTopology(m_remeshedVertices, m_remeshedQuads);
 
     auto t_mergeEnd = std::chrono::high_resolution_clock::now();
 
@@ -999,12 +1316,14 @@ bool AutoRemesher::remesh()
     const long long t_parallelWallUs = elapsedUs(t_buildEnd, t_parallelEnd);
     const long long t_mergeUs = elapsedUs(t_parallelEnd, t_mergeEnd);
     const long long t_totalUs = elapsedUs(t_start, t_mergeEnd);
+    const long long t_analyzeUs = (long long)(m_inputAnalysisMilliseconds * 1000.0);
 
     const long long t_decimateUs = decimationStats.timeUs.load();
     const long long t_adaptiveFieldUs = adaptiveFieldTime.load();
     const size_t decimatedIslands = decimationStats.islandsDecimated.load();
 
     m_phaseReport.clear();
+    m_phaseTimings.clear();
     {
         std::ostringstream line;
         // Whole milliseconds hide the per-island steps on a mesh split into many
@@ -1016,10 +1335,18 @@ bool AutoRemesher::remesh()
             value << (double)microseconds / 1000.0 << " ms";
             return value.str();
         };
-        auto phase = [&](const char* name, long long microseconds) {
+        // Every phase lands in two places at once: the line a human reads and the
+        // record a script reads.  Keeping them in step here is the only way they
+        // cannot drift apart.
+        auto phase = [&](const char* name, long long microseconds, bool accumulated = false) {
             line.str(std::string());
             line << name << ": " << milliseconds(microseconds);
             m_phaseReport.push_back(line.str());
+            PhaseTiming timing;
+            timing.name = name;
+            timing.milliseconds = (double)microseconds / 1000.0;
+            timing.accumulated = accumulated;
+            m_phaseTimings.push_back(timing);
         };
 
         line.str(std::string());
@@ -1027,6 +1354,7 @@ bool AutoRemesher::remesh()
              << ", input triangles: " << m_triangles.size();
         m_phaseReport.push_back(line.str());
 
+        phase("Analyze input topology", t_analyzeUs);
         phase("Compute voxel size", t_voxelUs);
         phase("Split into islands", t_splitUs);
         phase("Build island contexts", t_buildUs);
@@ -1044,15 +1372,22 @@ bool AutoRemesher::remesh()
                  << milliseconds(t_decimateUs);
         }
         m_phaseReport.push_back(line.str());
+        {
+            PhaseTiming timing;
+            timing.name = "Mesh simplifier";
+            timing.milliseconds = (double)t_decimateUs / 1000.0;
+            timing.accumulated = true;
+            m_phaseTimings.push_back(timing);
+        }
 
         // The accumulated figures sum the islands, so on a multi-island mesh they
         // add up to more than the wall clock next to them.  That gap is the point:
         // accumulated / wall is how many cores the phase actually kept busy.
-        phase("Adaptive target length field (accumulated)", t_adaptiveFieldUs);
+        phase("Adaptive target length field (accumulated)", t_adaptiveFieldUs, true);
         phase("Isotropic remesh (accumulated)",
-            resampleTime.load() - t_decimateUs - t_adaptiveFieldUs);
-        phase("Parameterize (accumulated)", parameterizeTimeAccumulated.load());
-        phase("Quad extract (accumulated)", extractTimeAccumulated.load());
+            resampleTime.load() - t_decimateUs - t_adaptiveFieldUs, true);
+        phase("Parameterize (accumulated)", parameterizeTimeAccumulated.load(), true);
+        phase("Quad extract (accumulated)", extractTimeAccumulated.load(), true);
 
         {
             std::lock_guard<std::mutex> lock(m_stageTimingMutex);
@@ -1064,6 +1399,11 @@ bool AutoRemesher::remesh()
                 line.str(std::string());
                 line << "    " << it.name << ": " << milliseconds(it.microseconds);
                 m_phaseReport.push_back(line.str());
+                PhaseTiming timing;
+                timing.name = it.name;
+                timing.milliseconds = (double)it.microseconds / 1000.0;
+                timing.accumulated = true;
+                m_phaseTimings.push_back(timing);
             }
         }
 
@@ -1077,21 +1417,30 @@ bool AutoRemesher::remesh()
             line.str(std::string());
             line.setf(std::ios::fixed);
             line.precision(2);
+            m_coresBusy = (t_parallelWallUs > 0)
+                ? (double)accumulated / (double)t_parallelWallUs
+                : 0.0;
             line << "Cores kept busy across the parallel phase: "
-                 << (t_parallelWallUs > 0 ? (double)accumulated / t_parallelWallUs : 0.0)
+                 << m_coresBusy
                  << " (islands are the unit of parallelism)";
             m_phaseReport.push_back(line.str());
+            PhaseTiming timing;
+            timing.name = "Cores kept busy";
+            timing.milliseconds = m_coresBusy;
+            m_phaseTimings.push_back(timing);
         }
 
         phase("Merge islands", t_mergeUs);
         phase("Total", t_totalUs);
     }
 
-    for (const auto& line : m_phaseReport)
-        std::cerr << line << std::endl;
+    if (m_reportEnabled) {
+        for (const auto& line : m_phaseReport)
+            Log::write(Log::Normal, line + "\n");
+    }
 
 #if AUTO_REMESHER_DEBUG
-    std::cerr << "Remesh done" << std::endl;
+    Log::write(Log::Debug, "Remesh done\n");
 #endif
 
     if (nullptr != m_progressHandler)
@@ -1099,5 +1448,18 @@ bool AutoRemesher::remesh()
 
     return true;
 }
+
+
+void AutoRemesher::analyzeInput()
+{
+    if (m_inputAnalyzed)
+        return;
+    const auto start = std::chrono::high_resolution_clock::now();
+    m_inputStats = analyzeTopology(m_vertices, m_triangles);
+    const auto end = std::chrono::high_resolution_clock::now();
+    m_inputAnalysisMilliseconds = (double)std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    m_inputAnalyzed = true;
+}
+
 
 }

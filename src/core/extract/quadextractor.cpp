@@ -21,13 +21,13 @@
 #include <AutoRemesher/MeshSeparator>
 #include <AutoRemesher/PositionKey>
 #include <AutoRemesher/QuadExtractor>
+#include <core/base/logging.h>
 #include <algorithm>
 #include <axisalignedboundingbox.h>
 #include <axisalignedboundingboxtree.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <set>
@@ -115,15 +115,19 @@ bool QuadExtractor::extract()
     // cross point is created.  Zero restores the historical fixed 1e-5 even when
     // a previous extraction on this thread set a relative step.
     PositionKey::setTolerance(m_positionTolerance > 0.0 ? m_positionTolerance : 1e-5);
+    m_extractionStats = ExtractionStats();
 
     report(0.0f, "Extracting connections");
-    std::cerr << "Extract connections..." << std::endl;
+    Log::write(Log::Debug, "Extract connections...");
     std::vector<Vector3> crossPoints;
     std::vector<size_t> crossPointSourceTriangles;
+    // The cover uv of every cross point, in the same order; it becomes the uv of
+    // the remeshed vertex the point turns into.
+    std::vector<Vector2> crossPointUvs;
     std::set<std::pair<size_t, size_t>> connections;
-    extractConnections(&crossPoints, &crossPointSourceTriangles, &connections);
+    extractConnections(&crossPoints, &crossPointSourceTriangles, &crossPointUvs, &connections);
     report(0.07f, "Holding singular lines");
-    holdSingularLines(&crossPoints, &crossPointSourceTriangles, &connections);
+    holdSingularLines(&crossPoints, &crossPointSourceTriangles, &crossPointUvs, &connections);
     m_extractedConnections.clear();
     m_extractedConnectionMoved.clear();
     m_extractedConnections.reserve(connections.size());
@@ -159,7 +163,7 @@ bool QuadExtractor::extract()
             m_extractedConnectionMoved.push_back(0);
         }
     }
-    std::cerr << "Extract connections done" << std::endl;
+    Log::write(Log::Debug, "Extract connections done");
 
 #if AUTO_REMESHER_DEV
     {
@@ -176,16 +180,16 @@ bool QuadExtractor::extract()
 #endif
 
     report(0.21f, "Extracting edges");
-    std::cerr << "Extract edges..." << std::endl;
+    Log::write(Log::Debug, "Extract edges...");
     std::unordered_map<size_t, std::unordered_set<size_t>> edgeConnectMap;
     extractEdges(connections, &edgeConnectMap);
-    if (collapseShortEdges(&crossPoints, &edgeConnectMap))
+    if (collapseShortEdges(&crossPoints, &crossPointUvs, &edgeConnectMap))
         simplifyGraph(edgeConnectMap);
-    collapseTriangles(&crossPoints, &edgeConnectMap);
+    collapseTriangles(&crossPoints, &crossPointUvs, &edgeConnectMap);
     if (removeSingleEndpoints(&crossPoints, &edgeConnectMap))
         simplifyGraph(edgeConnectMap);
 
-    std::cerr << "Extract edges done" << std::endl;
+    Log::write(Log::Debug, "Extract edges done");
 
 #if AUTO_REMESHER_DEV
     {
@@ -217,9 +221,9 @@ bool QuadExtractor::extract()
 #endif
 
     report(0.25f, "Extracting mesh");
-    std::cerr << "Extract mesh..." << std::endl;
-    extractMesh(crossPoints, crossPointSourceTriangles, edgeConnectMap, &m_remeshedPolygons);
-    std::cerr << "Extract mesh done" << std::endl;
+    Log::write(Log::Debug, "Extract mesh...");
+    extractMesh(crossPoints, crossPointUvs, crossPointSourceTriangles, edgeConnectMap, &m_remeshedPolygons);
+    Log::write(Log::Debug, "Extract mesh done");
 
     report(0.29f, "Fixing holes");
     fixHoles();
@@ -239,11 +243,10 @@ bool QuadExtractor::extract()
                 fprintf(fp, " %zu", 1 + v);
             }
             if (indices.size() != it.size()) {
-                std::cerr << "Found repeated vertices in face:";
-                for (const auto& v : it) {
-                    std::cerr << v << " ";
-                }
-                std::cerr << std::endl;
+                std::string repeated;
+                for (const auto& v : it)
+                    repeated += " " + std::to_string(v);
+                Log::write(Log::Debug, "Found repeated vertices in face:" + repeated);
             }
             fprintf(fp, "\n");
         }
@@ -274,25 +277,19 @@ bool QuadExtractor::extract()
                 usedVertices.insert(v);
         }
         if (usedVertices.size() < m_remeshedVertices.size()) {
-            std::vector<Vector3> compactedVertices;
             std::unordered_map<size_t, size_t> oldToNew;
-            compactedVertices.reserve(usedVertices.size());
-            for (const auto& oldIndex : usedVertices) {
-                oldToNew[oldIndex] = compactedVertices.size();
-                compactedVertices.push_back(m_remeshedVertices[oldIndex]);
-            }
+            compactRemeshedVerticesAscending(usedVertices, &oldToNew);
             for (auto& face : m_remeshedPolygons) {
                 for (auto& v : face)
                     v = oldToNew[v];
             }
-            m_remeshedVertices = std::move(compactedVertices);
         }
     }
 
     report(0.31f, "Smoothing and projecting");
-    std::cerr << "Smooth and project..." << std::endl;
+    Log::write(Log::Debug, "Smooth and project...");
     smoothAndProject(5);
-    std::cerr << "Smooth and project done" << std::endl;
+    Log::write(Log::Debug, "Smooth and project done");
 
     report(0.44f, "Splitting seven edge faces");
     splitSevenEdgeFaces();
@@ -336,11 +333,20 @@ bool QuadExtractor::extract()
         const size_t applied = optimizeLocalTopology(4000);
         const size_t patches = requadrangulateNonQuadPatches(2000);
         if (applied > 0 || patches > 0)
-            std::cerr << "Local topology optimisation applied " << applied << " operation(s), "
-                      << patches << " patch(es)" << std::endl;
+            Log::write(Log::Debug, "Local topology optimisation applied " + std::to_string(applied) + " operation(s), " + std::to_string(patches) + " patch(es)");
         rebuildHalfEdges();
     }
     report(1.0f, "");
+
+    // A uv the passes could not follow is worth less than no uv at all: the
+    // transfer downstream would put a seam through the middle of a face.
+    Log::write(Log::Debug, "Remeshed vertices:" + std::to_string(m_remeshedVertices.size())
+            + ", remeshed vertex uvs:" + std::to_string(m_remeshedVertexUvs.size()));
+    if (m_remeshedVertexUvs.size() != m_remeshedVertices.size()) {
+        Log::write(Log::Debug, "uv bookkeeping lost " + std::to_string(m_remeshedVertices.size())
+                + " vertex uv(s)");
+        m_remeshedVertexUvs.clear();
+    }
 
 #if AUTO_REMESHER_DEV
     {
@@ -437,6 +443,7 @@ bool QuadExtractor::removeSingleEndpoints(std::vector<Vector3>* crossPoints,
 }
 
 bool QuadExtractor::collapseTriangles(std::vector<Vector3>* crossPoints,
+    std::vector<Vector2>* crossPointUvs,
     std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap)
 {
     auto& graph = *edgeConnectMap;
@@ -491,7 +498,7 @@ bool QuadExtractor::collapseTriangles(std::vector<Vector3>* crossPoints,
         // An earlier collapse may have already taken this one apart
         if (!stillATriangle)
             continue;
-        collapseEdge(crossPoints, edgeConnectMap, shortestEdge);
+        collapseEdge(crossPoints, crossPointUvs, edgeConnectMap, shortestEdge);
         collapsed = true;
     }
 
@@ -499,6 +506,7 @@ bool QuadExtractor::collapseTriangles(std::vector<Vector3>* crossPoints,
 }
 
 bool QuadExtractor::collapseShortEdges(std::vector<Vector3>* crossPoints,
+    std::vector<Vector2>* crossPointUvs,
     std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap)
 {
     double totalLength = 0.0;
@@ -522,13 +530,14 @@ bool QuadExtractor::collapseShortEdges(std::vector<Vector3>* crossPoints,
     for (const auto& it : edgeLengths) {
         if (it.second > collapsedLength)
             continue;
-        collapseEdge(crossPoints, edgeConnectMap, it.first);
+        collapseEdge(crossPoints, crossPointUvs, edgeConnectMap, it.first);
         collapsed = true;
     }
     return collapsed;
 }
 
 void QuadExtractor::collapseEdge(std::vector<Vector3>* crossPoints,
+    std::vector<Vector2>* crossPointUvs,
     std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap,
     const std::pair<size_t, size_t>& edge)
 {
@@ -544,6 +553,8 @@ void QuadExtractor::collapseEdge(std::vector<Vector3>* crossPoints,
         return;
     auto firstNeighbors = findFirstNeighbors->second;
     (*crossPoints)[edge.second] = ((*crossPoints)[edge.first] + (*crossPoints)[edge.second]) * 0.5;
+    // The surviving point moved to the midpoint of the pair, so its uv does too.
+    (*crossPointUvs)[edge.second] = ((*crossPointUvs)[edge.first] + (*crossPointUvs)[edge.second]) * 0.5;
     for (const auto& neighbor : firstNeighbors) {
         if (neighbor == edge.second)
             continue;
@@ -558,6 +569,7 @@ void QuadExtractor::collapseEdge(std::vector<Vector3>* crossPoints,
 }
 
 void QuadExtractor::extractMesh(std::vector<Vector3>& points,
+    const std::vector<Vector2>& pointUvs,
     const std::vector<size_t>& pointSourceTriangles,
     std::unordered_map<size_t, std::unordered_set<size_t>>& edgeConnectMap,
     std::vector<std::vector<size_t>>* quads)
@@ -835,10 +847,15 @@ void QuadExtractor::extractMesh(std::vector<Vector3>& points,
     }
 
     m_remeshedVertices = points;
+    // The quads above index the cross points, so the cover uvs come across in the
+    // same order and the whole cleanup chain below only ever has to follow the
+    // vertex array.
+    m_remeshedVertexUvs = pointUvs;
 }
 
 void QuadExtractor::extractConnections(std::vector<Vector3>* crossPoints,
     std::vector<size_t>* sourceTriangles,
+    std::vector<Vector2>* crossPointUvs,
     std::set<std::pair<size_t, size_t>>* connections)
 {
     std::unordered_map<PositionKey, size_t, PositionKeyHash> crossPointMap;
@@ -846,11 +863,15 @@ void QuadExtractor::extractConnections(std::vector<Vector3>* crossPoints,
     m_connectionInfos.clear();
     m_addedConnections.clear();
 
-    auto addCrossPoint = [&](const Vector3& position3, size_t triangleIndex) {
+    auto addCrossPoint = [&](const Vector3& position3, const Vector2& position2,
+                             size_t triangleIndex) {
+        // The weld keeps the first point inserted for a quantised position, so the
+        // uv pushed here is the one belonging to the position that is kept.
         auto insertResult = crossPointMap.insert({ position3, crossPoints->size() });
         if (insertResult.second) {
             crossPoints->push_back(position3);
             sourceTriangles->push_back(triangleIndex);
+            crossPointUvs->push_back(position2);
         }
         return insertResult.first->second;
     };
@@ -1002,8 +1023,8 @@ void QuadExtractor::extractConnections(std::vector<Vector3>* crossPoints,
                         }
                     }
                     for (const auto& segment : segments) {
-                        addConnection(addCrossPoint(segment[0].position3, triangleIndex),
-                            addCrossPoint(segment[1].position3, triangleIndex),
+                        addConnection(addCrossPoint(segment[0].position3, segment[0].position2, triangleIndex),
+                            addCrossPoint(segment[1].position3, segment[1].position2, triangleIndex),
                             triangleIndex, (int)i, targetIt.first);
                     }
                 }
@@ -1014,6 +1035,7 @@ void QuadExtractor::extractConnections(std::vector<Vector3>* crossPoints,
 
 void QuadExtractor::holdSingularLines(std::vector<Vector3>* crossPoints,
     std::vector<size_t>* sourceTriangles,
+    std::vector<Vector2>* crossPointUvs,
     std::set<std::pair<size_t, size_t>>* connections)
 {
     if (nullptr == m_singularVertices || m_singularVertices->empty())
@@ -1074,6 +1096,10 @@ void QuadExtractor::holdSingularLines(std::vector<Vector3>* crossPoints,
         const size_t newPointIndex = crossPoints->size();
         crossPoints->push_back(crossing.position);
         sourceTriangles->push_back(info.triangleIndex);
+        // The crossing sits on the edge it was found on, so its uv is the uv of
+        // that edge taken at the same ratio the position was.
+        crossPointUvs->push_back(uvOnSegment(*crossPoints, *crossPointUvs,
+            crossing.edge.first, crossing.edge.second, crossing.position));
         connections->erase({ crossing.edge.first, crossing.edge.second });
         connections->erase({ crossing.edge.second, crossing.edge.first });
         m_connectionInfos.erase(crossing.edge);
@@ -1360,8 +1386,8 @@ void QuadExtractor::holdSingularLines(std::vector<Vector3>* crossPoints,
         ++walkedCones;
     }
 
-    std::cerr << "Hold singular lines walked " << walkedCones << " of " << starvedCones
-              << " starved cone(s), added " << addedConnections << " connection(s)" << std::endl;
+    Log::write(Log::Debug, "Hold singular lines walked " + std::to_string(walkedCones) + " of "
+            + std::to_string(starvedCones) + " starved cone(s), added " + std::to_string(addedConnections) + " connection(s)");
 }
 
 bool QuadExtractor::testPointInTriangle(const std::vector<Vector3>& points,
@@ -1406,8 +1432,9 @@ void QuadExtractor::fixHoles()
     // discovery stays deterministic, so it gets its own ordered copy.
     std::set<std::pair<size_t, size_t>> orderedHalfEdges(m_halfEdges.begin(), m_halfEdges.end());
     std::vector<std::vector<size_t>> loops;
-    searchBoundaries(orderedHalfEdges, &loops);
     size_t gradedFaces = 0;
+    m_extractionStats.holesIgnored = 0;  // this pass sees the holes still open
+    searchBoundaries(orderedHalfEdges, &loops);
     for (auto& loop : loops) {
         if (m_gradedHoleFilling && loop.size() > 8
             && (loop.size() <= 65 || m_projectedHoleCaps)) {
@@ -1415,21 +1442,26 @@ void QuadExtractor::fixHoles()
             // non-positive, which is exactly what the large holes hit.  Seal them
             // by ear clipping instead; the triangle cleanup passes that run
             // afterwards pair the triangles into quads where they can.
-            std::cerr << "Fixing hole (graded) at length:" << loop.size() << "..." << std::endl;
-            gradedFaces += fillHoleGraded(loop);
+            Log::write(Log::Debug, "Fixing hole (graded) at length:" + std::to_string(loop.size()));
+            const size_t added = fillHoleGraded(loop);
+            gradedFaces += added;
+            recordFilledHole(added);
             continue;
         }
         if (loop.size() > 65) {
-            std::cerr << "Ignore long hole at length:" << loop.size() << std::endl;
+            Log::write(Log::Debug, "Ignore long hole at length:" + std::to_string(loop.size()));
+            ++m_extractionStats.holesIgnored;
             continue;
         }
-        std::cerr << "Fixing hole at length:" << loop.size() << "..." << std::endl;
+        Log::write(Log::Debug, "Fixing hole at length:" + std::to_string(loop.size()));
+        const size_t facesBeforeHole = m_remeshedPolygons.size();
         fixHoleWithQuads(loop, true);
         if (loop.size() >= 4)
             fixHoleWithQuads(loop, false);
+        recordFilledHole(m_remeshedPolygons.size() - facesBeforeHole);
     }
     if (m_gradedHoleFilling && gradedFaces > 0) {
-        std::cerr << "Graded hole filling added " << gradedFaces << " face(s)" << std::endl;
+        Log::write(Log::Debug, "Graded hole filling added " + std::to_string(gradedFaces) + " face(s)");
         rebuildHalfEdges();
     }
 }
@@ -1458,9 +1490,13 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
         newFaces.push_back(std::move(face));
     };
     Vector3 center(0, 0, 0);
-    for (const size_t vertex : polygon)
+    Vector2 centerUv;
+    for (const size_t vertex : polygon) {
         center += m_remeshedVertices[vertex];
+        centerUv = centerUv + remeshedVertexUv(vertex);
+    }
     center = center / (double)count;
+    centerUv = centerUv * (1.0 / (double)count);
 
     double perimeter = 0.0;
     for (size_t i = 0; i < count; ++i)
@@ -1478,6 +1514,8 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
             center = projectedCenter;
         const size_t centerIndex = m_remeshedVertices.size();
         m_remeshedVertices.push_back(center);
+        // The cap centre is the average of the ring, so its uv is too.
+        pushRemeshedVertexUv(centerUv);
         std::vector<size_t> ring(count);
         for (size_t i = 0; i < count; ++i) {
             Vector3 midpoint = (m_remeshedVertices[polygon[i]] + center) * 0.5;
@@ -1486,6 +1524,7 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
                 midpoint = projectedMidpoint;
             ring[i] = m_remeshedVertices.size();
             m_remeshedVertices.push_back(midpoint);
+            pushRemeshedVertexUv((remeshedVertexUv(polygon[i]) + centerUv) * 0.5);
         }
         for (size_t i = 0; i < count; ++i)
             addFace({ polygon[i], polygon[(i + 1) % count],
@@ -1502,6 +1541,8 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
     } else {
         const size_t centerIndex = m_remeshedVertices.size();
         m_remeshedVertices.push_back(center);
+        // The cap centre is the average of the ring, so its uv is too.
+        pushRemeshedVertexUv(centerUv);
         if (0 == count % 2) {
             for (size_t k = 0; k < count / 2; ++k)
                 addFace({ polygon[2 * k], polygon[(2 * k + 1) % count],
@@ -1514,6 +1555,7 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole)
     }
     if (newFaces.empty()) {
         m_remeshedVertices.resize(firstNewVertex);
+        truncateRemeshedVertexUvs(firstNewVertex);
         return 0;
     }
     for (auto& face : newFaces)
@@ -1728,10 +1770,9 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
         std::map<size_t, size_t> sizeHistogram;
         for (const auto& face : m_remeshedPolygons)
             ++sizeHistogram[face.size()];
-        fprintf(stderr, "[topo] before, faces by size:");
-        for (const auto& it : sizeHistogram)
-            fprintf(stderr, " %zu:%zu", it.first, it.second);
-        fprintf(stderr, "\n");
+        std::string sizes;
+        for (const auto& it : sizeHistogram) sizes += " " + std::to_string(it.first) + ":" + std::to_string(it.second);
+        Log::write(Log::Debug, "[topo] before, faces by size:" + sizes);
         // Which re-pairings are even available: edge adjacent pairs where at
         // least one side is not a quad, keyed by the two face sizes.
         std::map<std::pair<size_t, size_t>, size_t> pairCensus;
@@ -1745,10 +1786,9 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
             ++pairCensus[std::make_pair(std::min(firstSize, secondSize),
                 std::max(firstSize, secondSize))];
         }
-        fprintf(stderr, "[topo] candidate pairs (small:large):");
-        for (const auto& it : pairCensus)
-            fprintf(stderr, " %zu:%zu=%zu", it.first.first, it.first.second, it.second);
-        fprintf(stderr, "\n");
+        std::string pairs;
+        for (const auto& it : pairCensus) pairs += " " + std::to_string(it.first.first) + ":" + std::to_string(it.first.second) + "=" + std::to_string(it.second);
+        Log::write(Log::Debug, "[topo] candidate pairs (small:large):" + pairs);
     }
 
     size_t mergeCount = 0;
@@ -1882,7 +1922,7 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
                     touchedVertices.insert(vertex);
                 ++mergeCount;
                 if (trace)
-                    fprintf(stderr, "[topo] merge %zu -> %zu\n", mergedFrom, merged.size());
+                    Log::write(Log::Debug, "[topo] merge " + std::to_string(mergedFrom) + " -> " + std::to_string(merged.size()));
                 return true;
             }
             const size_t n = unionPolygon.size();
@@ -1907,8 +1947,7 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
                 touchedVertices.insert(vertex);
             ++splitCount;
             if (trace)
-                fprintf(stderr, "[topo] split %zu -> %zu+%zu\n", n, firstFace.size(),
-                    secondFace.size());
+                Log::write(Log::Debug, "[topo] split " + std::to_string(n) + " -> " + std::to_string(firstFace.size()) + "+" + std::to_string(secondFace.size()));
             return true;
         }
         return false;
@@ -1937,11 +1976,9 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
         std::map<size_t, size_t> sizeHistogram;
         for (const auto& face : m_remeshedPolygons)
             ++sizeHistogram[face.size()];
-        fprintf(stderr, "[topo] applied merges:%zu splits:%zu, faces by size now:",
-            mergeCount, splitCount);
-        for (const auto& it : sizeHistogram)
-            fprintf(stderr, " %zu:%zu", it.first, it.second);
-        fprintf(stderr, "\n");
+        std::string sizes;
+        for (const auto& it : sizeHistogram) sizes += " " + std::to_string(it.first) + ":" + std::to_string(it.second);
+        Log::write(Log::Debug, "[topo] applied merges:" + std::to_string(mergeCount) + " splits:" + std::to_string(splitCount) + ", faces by size now:" + sizes);
     }
 
     // Pull the rewired patches back onto the source surface, the way every other
@@ -2495,9 +2532,13 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                         // valence three or five is a new singularity and is paid for.
                         if (fanEnabled && length >= 6 && length <= fanMaxCorners && 0 == length % 2) {
                             Vector3 center;
-                            for (const size_t vertex : polygon)
+                            Vector2 centerUv;
+                            for (const size_t vertex : polygon) {
                                 center += m_remeshedVertices[vertex];
+                                centerUv = centerUv + remeshedVertexUv(vertex);
+                            }
                             center /= (double)length;
+                            centerUv = centerUv * (1.0 / (double)length);
                             double radius = 0.0;
                             for (size_t i = 0; i < length; ++i) {
                                 const Vector3 edge
@@ -2510,6 +2551,8 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                                 && projectPointToSource(center, radius * 2.0, &projected))
                                 center = projected;
                             m_remeshedVertices.push_back(center);
+                            // A fan centre is the average of the polygon it fans
+                            pushRemeshedVertexUv(centerUv);
                             const size_t centerVertex = m_remeshedVertices.size() - 1;
                             const double centerValence = (double)(length / 2);
                             double fanCost = fanValenceWeight
@@ -2533,6 +2576,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                                 bestHere = std::move(fanQuads);
                             } else {
                                 m_remeshedVertices.pop_back();
+                                dropRemeshedVertexUv();
                             }
                         }
                         if (best < invalidCost)
@@ -2549,6 +2593,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                             // Fan centres allocated by the rejected search are not
                             // referenced by anything
                             m_remeshedVertices.resize(vertexCountBefore);
+                            truncateRemeshedVertexUvs(vertexCountBefore);
                         }
                     }
 
@@ -2613,9 +2658,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                                 else if (it.second.size() > 2)
                                     ++badEdges;
                             }
-                            fprintf(stderr, "[patch] %zu faces, %zu corners -> %zu quads, "
-                                            "open edges %zu, non-manifold %zu\n",
-                                patchFaces.size(), corners, bestQuads.size(), openEdges, badEdges);
+                            Log::write(Log::Debug, "[patch] " + std::to_string(patchFaces.size()) + " faces, " + std::to_string(corners) + " corners -> " + std::to_string(bestQuads.size()) + " quads, open edges " + std::to_string(openEdges) + ", non-manifold " + std::to_string(badEdges));
                         }
                         ++applied;
                         solved = true;
@@ -2626,6 +2669,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
                         }
                         // A solution refused here would leave its fan centres behind
                         m_remeshedVertices.resize(vertexCountBefore);
+                        truncateRemeshedVertexUvs(vertexCountBefore);
                         ++valenceRejected;
                     }
                     if (bestTotal >= invalidCost)
@@ -2719,6 +2763,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
             for (auto& vertex : face)
                 vertex = remap[vertex];
         m_remeshedVertices = std::move(compactedVertices);
+        remapRemeshedVertexUvs(used, remap);
         for (auto& vertex : touchedVertices)
             vertex = remap[vertex];
         std::sort(touchedVertices.begin(), touchedVertices.end());
@@ -2729,15 +2774,9 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
     }
 
     if (trace)
-        fprintf(stderr, "[patch] applied %zu, even boundaries %zu (no valid quadrangulation %zu, "
-                        "valence floor %zu), odd or oversized %zu, convex loops %zu, "
-                        "concave-targeted growths %zu\n",
-            applied, attempts, geometryRejected, valenceRejected, oddBoundary, convexLoops,
-            concaveGrowth);
+        Log::write(Log::Debug, "[patch] applied " + std::to_string(applied) + ", even boundaries " + std::to_string(attempts) + " (no valid quadrangulation " + std::to_string(geometryRejected) + ", valence floor " + std::to_string(valenceRejected) + "), odd or oversized " + std::to_string(oddBoundary) + ", convex loops " + std::to_string(convexLoops) + ", concave-targeted growths " + std::to_string(concaveGrowth));
     if (trace)
-        fprintf(stderr, "[patch] quad refusals: edge %zu, reflex %zu, sine %zu, planarity %zu, "
-                        "normal %zu, duplicate %zu\n",
-            rejectEdge, rejectReflex, rejectSine, rejectPlanarity, rejectNormal, rejectDuplicate);
+        Log::write(Log::Debug, "[patch] quad refusals: edge " + std::to_string(rejectEdge) + ", reflex " + std::to_string(rejectReflex) + ", sine " + std::to_string(rejectSine) + ", planarity " + std::to_string(rejectPlanarity) + ", normal " + std::to_string(rejectNormal) + ", duplicate " + std::to_string(rejectDuplicate));
 
     return applied;
 }
@@ -2754,7 +2793,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
 
     for (;;) {
         if (hole.size() <= 2) {
-            std::cerr << "fixHoleWithQuads cancel on edge length:" << hole.size() << std::endl;
+            Log::write(Log::Debug, "fixHoleWithQuads cancel on edge length:" + std::to_string(hole.size()));
             return;
         }
 
@@ -2788,7 +2827,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
             const auto& score = edgeScores[edgeIndex];
             if (checkScore) {
                 if (score.second <= 0) {
-                    std::cerr << "fixHoleWithQuads failed, highest score(dot):" << score.second << std::endl;
+                    Log::write(Log::Debug, "fixHoleWithQuads failed, highest score(dot):" + std::to_string(score.second));
                     return;
                 }
             }
@@ -2798,7 +2837,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
             int k = (j + 1) % hole.size();
             std::vector<size_t> candidate = { (size_t)hole[k], (size_t)hole[j], (size_t)hole[i], (size_t)hole[h] };
             if (m_halfEdges.end() != m_halfEdges.find({ candidate[0], candidate[1] }) || m_halfEdges.end() != m_halfEdges.find({ candidate[1], candidate[2] }) || m_halfEdges.end() != m_halfEdges.find({ candidate[2], candidate[3] }) || m_halfEdges.end() != m_halfEdges.find({ candidate[3], candidate[0] })) {
-                std::cerr << "fixHoleWithQuads ignore score:" << score.second << " because conflicts with existed quads" << std::endl;
+                Log::write(Log::Debug, "fixHoleWithQuads ignore score:" + std::to_string(score.second) + " because conflicts with existed quads");
                 continue;
             }
             std::vector<size_t> remainPoints;
@@ -2808,7 +2847,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
                 remainPoints.push_back(hole[w]);
             }
             if (testPointInTriangle(m_remeshedVertices, { candidate[0], candidate[1], candidate[2] }, remainPoints) || testPointInTriangle(m_remeshedVertices, { candidate[2], candidate[3], candidate[0] }, remainPoints)) {
-                std::cerr << "fixHoleWithQuads ignore score:" << score.second << " because other point in the same loop fall into quad plane" << std::endl;
+                Log::write(Log::Debug, "fixHoleWithQuads ignore score:" + std::to_string(score.second) + " because other point in the same loop fall into quad plane");
                 continue;
             }
             m_remeshedPolygons.push_back(candidate);
@@ -2832,7 +2871,7 @@ void QuadExtractor::fixHoleWithQuads(std::vector<size_t>& hole, bool checkScore)
 void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& halfEdges,
     std::vector<std::vector<size_t>>* loops)
 {
-    std::cerr << "Searching boundaries..." << std::endl;
+    Log::write(Log::Debug, "Searching boundaries...");
 
     std::unordered_map<size_t, std::unordered_set<size_t>> nextMap;
     for (const auto& it : halfEdges) {
@@ -2846,17 +2885,17 @@ void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& 
         std::vector<size_t> loop;
         size_t startVertex = it->first;
         bool validate = false;
-        std::cerr << "Searching loop from:" << startVertex << std::endl;
+        Log::write(Log::Debug, "Searching loop from:" + std::to_string(startVertex));
         while (it != nextMap.end()) {
             if (startVertex == it->first && loop.size() >= 3) {
-                std::cerr << "Found valid loop, size:" << loop.size() << std::endl;
+                Log::write(Log::Debug, "Found valid loop, size:" + std::to_string(loop.size()));
                 validate = true;
                 break;
             }
-            std::cerr << "Loop add vertex:" << it->first << std::endl;
+            Log::write(Log::Debug, "Loop add vertex:" + std::to_string(it->first));
             loop.push_back(it->first);
             if (it->second.size() != 1) {
-                std::cerr << "Break loop, because of next size:" << it->second.size() << std::endl;
+                Log::write(Log::Debug, "Break loop, because of next size:" + std::to_string(it->second.size()));
                 break;
             }
             it = nextMap.find(*it->second.begin());
@@ -2867,7 +2906,7 @@ void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& 
             loops->push_back(loop);
     }
 
-    std::cerr << "Searching boundaries done" << std::endl;
+    Log::write(Log::Debug, "Searching boundaries done");
 }
 
 bool QuadExtractor::removeIsolatedFaces()
@@ -2880,6 +2919,8 @@ bool QuadExtractor::removeIsolatedFaces()
         m_remeshedPolygons = *std::max_element(quadsIslands.begin(), quadsIslands.end(), [&](const std::vector<std::vector<size_t>>& first, const std::vector<std::vector<size_t>>& second) {
             return first.size() < second.size();
         });
+        m_extractionStats.patchesKept = 1;
+        m_extractionStats.patchesDropped = quadsIslands.size() - 1;
         return true;
     }
     const auto patchArea = [this](const std::vector<std::vector<size_t>>& patch) {
@@ -2899,15 +2940,19 @@ bool QuadExtractor::removeIsolatedFaces()
     if (!(totalArea > 0.0))
         return false;
     std::vector<std::vector<size_t>> kept;
+    size_t keptPatches = 0;
     for (size_t i = 0; i < quadsIslands.size(); ++i) {
         if (areas[i] < m_islandAreaFraction * totalArea)
             continue;
+        ++keptPatches;
         for (const auto& face : quadsIslands[i])
             kept.push_back(face);
     }
     if (kept.empty())
         return false;
     m_remeshedPolygons = std::move(kept);
+    m_extractionStats.patchesKept = keptPatches;
+    m_extractionStats.patchesDropped = quadsIslands.size() - keptPatches;
     return true;
 }
 
@@ -2951,6 +2996,9 @@ size_t QuadExtractor::weldKeptPatches()
         weldedFaces.push_back(std::move(mapped));
     }
     m_remeshedVertices.swap(weldedVertices);
+    // The weld keeps the vertex that already owned the quantised position, and
+    // remap sends every duplicate to it, so that vertex's uv is what survives.
+    remapRemeshedVertexUvs(remap);
     m_remeshedPolygons = std::move(weldedFaces);
     return m_remeshedPolygons.size();
 }
@@ -3311,7 +3359,7 @@ void QuadExtractor::splitSixEdgeFaces()
             }
         }
         if (-1 == bestCorner) {
-            std::cerr << "Six edge face kept, no diagonal available" << std::endl;
+            Log::write(Log::Debug, "Six edge face kept, no diagonal available");
             polygons.push_back(face);
             continue;
         }
@@ -3327,7 +3375,7 @@ void QuadExtractor::splitSixEdgeFaces()
     if (0 == splitNum)
         return;
 
-    std::cerr << "Split six edge faces:" << splitNum << std::endl;
+    Log::write(Log::Debug, "Split six edge faces:" + std::to_string(splitNum));
     m_remeshedPolygons = std::move(polygons);
     rebuildHalfEdges();
 }
@@ -3564,6 +3612,10 @@ void QuadExtractor::convertTriangleAndFiveEdgeFans()
             }
 
             m_remeshedVertices.push_back(addedPosition);
+            // A fan centre is the average of the four alternate ring corners
+            pushRemeshedVertexUv((remeshedVertexUv(octagon[0]) + remeshedVertexUv(octagon[2])
+                                     + remeshedVertexUv(octagon[4]) + remeshedVertexUv(octagon[6]))
+                * 0.25);
             for (size_t i = 0; i < quads.size(); ++i) {
                 if (i < run.size())
                     m_remeshedPolygons[run[i]] = quads[i];
@@ -3585,7 +3637,7 @@ void QuadExtractor::convertTriangleAndFiveEdgeFans()
     if (0 == convertNum)
         return;
 
-    std::cerr << "Convert triangle and five edge fans:" << convertNum << std::endl;
+    Log::write(Log::Debug, "Convert triangle and five edge fans:" + std::to_string(convertNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(convertedVertices, 3, 5);
@@ -3919,6 +3971,9 @@ void QuadExtractor::collapseThreeValenceDiagonals()
         }
 
         m_remeshedVertices.push_back(addedPosition);
+        // The point in the middle of the collapsed diagonal is the midpoint of the
+        // pair, so its uv is the midpoint of theirs
+        pushRemeshedVertexUv((remeshedVertexUv(first) + remeshedVertexUv(second)) * 0.5);
         growVertexArrays(addedVertex + 1);
         if (vertexFaces.size() <= addedVertex)
             vertexFaces.resize(addedVertex + 1);
@@ -3962,21 +4017,8 @@ void QuadExtractor::collapseThreeValenceDiagonals()
         m_remeshedPolygons = std::move(keptFaces);
     }
     // The two collapsed points are left with no face of their own
-    std::vector<size_t> oldToNew(m_remeshedVertices.size(), std::numeric_limits<size_t>::max());
-    std::vector<Vector3> compactedVertices;
-    compactedVertices.reserve(m_remeshedVertices.size());
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (std::numeric_limits<size_t>::max() != oldToNew[vertex])
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons)
-        for (auto& vertex : face)
-            vertex = oldToNew[vertex];
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVerticesIndexed();
     std::unordered_set<size_t> compactedCollapsedVertices;
     for (const auto& vertex : collapsedVertices) {
         if (vertex >= oldToNew.size())
@@ -3986,7 +4028,7 @@ void QuadExtractor::collapseThreeValenceDiagonals()
             compactedCollapsedVertices.insert(newVertex);
     }
 
-    std::cerr << "Collapse three valence diagonals:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Collapse three valence diagonals:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     // The point in the middle came from the diagonal, not from the source mesh, pull
@@ -4130,21 +4172,8 @@ void QuadExtractor::mergeDoubleSharedEdgeQuads()
     if (0 == mergeNum)
         return;
 
-    std::map<size_t, size_t> oldToNew;
-    std::vector<Vector3> compactedVertices;
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (oldToNew.end() != oldToNew.find(vertex))
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons) {
-        for (auto& vertex : face)
-            vertex = oldToNew.at(vertex);
-    }
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVertices();
     std::unordered_set<size_t> compactedMergedVertices;
     for (const auto& vertex : mergedVertices) {
         const auto& findNew = oldToNew.find(vertex);
@@ -4152,7 +4181,7 @@ void QuadExtractor::mergeDoubleSharedEdgeQuads()
             compactedMergedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Merge double shared edge quads:" << mergeNum << std::endl;
+    Log::write(Log::Debug, "Merge double shared edge quads:" + std::to_string(mergeNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedMergedVertices, 3, 5);
@@ -4443,6 +4472,9 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
 
             addedVertex = m_remeshedVertices.size();
             m_remeshedVertices.push_back(bestPosition);
+            pushRemeshedVertexUv((remeshedVertexUv(bestOctagon[0]) + remeshedVertexUv(bestOctagon[2])
+                                     + remeshedVertexUv(bestOctagon[4]) + remeshedVertexUv(bestOctagon[6]))
+                * 0.25);
             for (const auto& quad : bestQuads)
                 existingFaces.insert(canonicalFaceHash(quad));
             for (size_t i = 0; i < bestRun.size(); ++i) {
@@ -4481,21 +4513,8 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
     if (0 == mergeNum)
         return;
 
-    std::map<size_t, size_t> oldToNew;
-    std::vector<Vector3> compactedVertices;
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (oldToNew.end() != oldToNew.find(vertex))
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons) {
-        for (auto& vertex : face)
-            vertex = oldToNew.at(vertex);
-    }
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVertices();
     std::unordered_set<size_t> compactedMergedVertices;
     for (const auto& vertex : mergedVertices) {
         const auto& findNew = oldToNew.find(vertex);
@@ -4503,7 +4522,7 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
             compactedMergedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Merge three and five valence triangles:" << mergeNum << std::endl;
+    Log::write(Log::Debug, "Merge three and five valence triangles:" + std::to_string(mergeNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedMergedVertices, 3, 5);
@@ -4680,6 +4699,8 @@ void QuadExtractor::collapseThreeValenceCorners()
                 }
 
                 m_remeshedVertices.push_back(addedPosition);
+                // The corner and the opposite corner meet in the middle
+                pushRemeshedVertexUv((remeshedVertexUv(corner) + remeshedVertexUv(opposite)) * 0.5);
                 removedFaces.insert(faceIndex);
                 size_t rewrittenIndex = 0;
                 for (const auto& affected : affectedFaces) {
@@ -4722,21 +4743,8 @@ void QuadExtractor::collapseThreeValenceCorners()
     if (0 == collapseCount)
         return;
 
-    std::map<size_t, size_t> oldToNew;
-    std::vector<Vector3> compactedVertices;
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (oldToNew.end() != oldToNew.find(vertex))
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons) {
-        for (auto& vertex : face)
-            vertex = oldToNew.at(vertex);
-    }
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVertices();
     std::unordered_set<size_t> compactedCollapsedVertices;
     for (const auto& vertex : collapsedVertices) {
         const auto& findNew = oldToNew.find(vertex);
@@ -4744,7 +4752,7 @@ void QuadExtractor::collapseThreeValenceCorners()
             compactedCollapsedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Collapse three valence corners:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Collapse three valence corners:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedCollapsedVertices, 3, 5);
@@ -4994,6 +5002,12 @@ void QuadExtractor::splitHighValenceTriangleFans()
 
             splitVertices.insert(m_remeshedVertices.size());
             m_remeshedVertices.push_back(bestPosition);
+            // The new point is the midpoint of the fan centre (octagon[0]) and the
+            // vertex across the buried edge (octagon[4]), the same pair that gave
+            // bestPosition
+            pushRemeshedVertexUv((remeshedVertexUv(bestOctagon[0])
+                                     + remeshedVertexUv(bestOctagon[4]))
+                * 0.5);
             for (size_t i = 0; i < bestRun.size(); ++i)
                 m_remeshedPolygons[bestRun[i]] = bestQuads[i];
             touchedVertices.insert(bestOctagon.begin(), bestOctagon.end());
@@ -5009,7 +5023,7 @@ void QuadExtractor::splitHighValenceTriangleFans()
     if (0 == splitNum)
         return;
 
-    std::cerr << "Split high valence triangle fans:" << splitNum << std::endl;
+    Log::write(Log::Debug, "Split high valence triangle fans:" + std::to_string(splitNum));
     rebuildHalfEdges();
 
     smoothAroundVertices(splitVertices, 3, 5);
@@ -5283,21 +5297,8 @@ void QuadExtractor::collapseThreeValenceEdgePairs()
     if (0 == collapseCount)
         return;
 
-    std::map<size_t, size_t> oldToNew;
-    std::vector<Vector3> compactedVertices;
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (oldToNew.end() != oldToNew.find(vertex))
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons) {
-        for (auto& vertex : face)
-            vertex = oldToNew.at(vertex);
-    }
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVertices();
     std::unordered_set<size_t> compactedCollapsedVertices;
     for (const auto& vertex : collapsedVertices) {
         const auto& findNew = oldToNew.find(vertex);
@@ -5305,7 +5306,7 @@ void QuadExtractor::collapseThreeValenceEdgePairs()
             compactedCollapsedVertices.insert(findNew->second);
     }
 
-    std::cerr << "Collapse three valence edge pairs:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Collapse three valence edge pairs:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     smoothAroundVertices(compactedCollapsedVertices, 3, 5);
@@ -5502,7 +5503,7 @@ void QuadExtractor::switchHighValenceEdges()
     if (0 == switchNum)
         return;
 
-    std::cerr << "Switch high valence edges:" << switchNum << std::endl;
+    Log::write(Log::Debug, "Switch high valence edges:" + std::to_string(switchNum));
     rebuildHalfEdges();
 
     // The switched quads kept their points, pull the reconnected patches back
@@ -5765,10 +5766,13 @@ void QuadExtractor::cleanupTriangles()
 
         std::unordered_map<size_t, size_t> mergedInto;
         std::unordered_map<size_t, Vector3> mergedPositions;
+        std::unordered_map<size_t, Vector2> mergedUvs;
         for (const auto& rung : route) {
             mergedInto.insert({ rung.second, rung.first });
             mergedPositions.insert({ rung.first,
                 (m_remeshedVertices[rung.first] + m_remeshedVertices[rung.second]) * 0.5 });
+            mergedUvs.insert({ rung.first,
+                (remeshedVertexUv(rung.first) + remeshedVertexUv(rung.second)) * 0.5 });
         }
         const auto rewriteVertex = [&](size_t vertex) {
             const auto& findMerged = mergedInto.find(vertex);
@@ -5877,6 +5881,8 @@ void QuadExtractor::cleanupTriangles()
 
         for (const auto& it : mergedPositions) {
             m_remeshedVertices[it.first] = it.second;
+            // The survivor moved to the average of the pair it absorbed
+            setRemeshedVertexUv(it.first, mergedUvs[it.first]);
             collapsedVertices.insert(it.first);
         }
         for (size_t i = 0; i < changedFaces.size(); ++i) {
@@ -5901,21 +5907,8 @@ void QuadExtractor::cleanupTriangles()
                 keptFaces.push_back(std::move(face));
         m_remeshedPolygons = std::move(keptFaces);
     }
-    std::vector<size_t> oldToNew(m_remeshedVertices.size(), std::numeric_limits<size_t>::max());
-    std::vector<Vector3> compactedVertices;
-    compactedVertices.reserve(m_remeshedVertices.size());
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (std::numeric_limits<size_t>::max() != oldToNew[vertex])
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons)
-        for (auto& vertex : face)
-            vertex = oldToNew[vertex];
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVerticesIndexed();
     std::unordered_set<size_t> compactedCollapsedVertices;
     for (const auto& vertex : collapsedVertices) {
         if (vertex >= oldToNew.size())
@@ -5925,7 +5918,7 @@ void QuadExtractor::cleanupTriangles()
             compactedCollapsedVertices.insert(newVertex);
     }
 
-    std::cerr << "Cleanup triangle faces:" << collapseCount << std::endl;
+    Log::write(Log::Debug, "Cleanup triangle faces:" + std::to_string(collapseCount));
     rebuildHalfEdges();
 
     // The rungs met halfway, pull the closed up strips back onto the source mesh
@@ -6018,7 +6011,7 @@ void QuadExtractor::splitSevenEdgeFaces()
             }
         }
         if (-1 == bestCorner) {
-            std::cerr << "Seven edge face kept, no diagonal available" << std::endl;
+            Log::write(Log::Debug, "Seven edge face kept, no diagonal available");
             polygons.push_back(face);
             continue;
         }
@@ -6034,7 +6027,7 @@ void QuadExtractor::splitSevenEdgeFaces()
     if (0 == splitNum)
         return;
 
-    std::cerr << "Split seven edge faces:" << splitNum << std::endl;
+    Log::write(Log::Debug, "Split seven edge faces:" + std::to_string(splitNum));
     m_remeshedPolygons = std::move(polygons);
     rebuildHalfEdges();
 }
@@ -6332,6 +6325,8 @@ void QuadExtractor::mergeSharedFiveEdgeFaces(const ProgressHandler* progressHand
         }
 
         m_remeshedVertices[keep] = keepPosition;
+        // The kept vertex takes the midpoint of the collapsed edge, uv included
+        setRemeshedVertexUv(keep, (remeshedVertexUv(keep) + remeshedVertexUv(remove)) * 0.5);
         for (size_t i = 0; i < changedFaces.size(); ++i) {
             const size_t faceIndex = changedFaces[i];
             eraseFace(faceIndex);
@@ -6357,21 +6352,8 @@ void QuadExtractor::mergeSharedFiveEdgeFaces(const ProgressHandler* progressHand
     if (0 == mergeCount)
         return;
 
-    std::vector<size_t> oldToNew(m_remeshedVertices.size(), std::numeric_limits<size_t>::max());
-    std::vector<Vector3> compactedVertices;
-    compactedVertices.reserve(m_remeshedVertices.size());
-    for (const auto& face : m_remeshedPolygons) {
-        for (const auto vertex : face) {
-            if (std::numeric_limits<size_t>::max() != oldToNew[vertex])
-                continue;
-            oldToNew[vertex] = compactedVertices.size();
-            compactedVertices.push_back(m_remeshedVertices[vertex]);
-        }
-    }
-    for (auto& face : m_remeshedPolygons)
-        for (auto& vertex : face)
-            vertex = oldToNew[vertex];
-    m_remeshedVertices = std::move(compactedVertices);
+    // Drops what the pass left unreferenced; the uv array follows the same table.
+    const auto oldToNew = compactRemeshedVerticesIndexed();
     std::unordered_set<size_t> compactedMergedVertices;
     for (const auto& vertex : mergedVertices) {
         if (vertex >= oldToNew.size())
@@ -6381,7 +6363,7 @@ void QuadExtractor::mergeSharedFiveEdgeFaces(const ProgressHandler* progressHand
             compactedMergedVertices.insert(newVertex);
     }
 
-    std::cerr << "Merge shared five edge faces:" << mergeCount << std::endl;
+    Log::write(Log::Debug, "Merge shared five edge faces:" + std::to_string(mergeCount));
     rebuildHalfEdges();
 
     // The two pentagons closed up around the merged point, pull the patch back

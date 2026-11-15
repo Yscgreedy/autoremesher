@@ -23,6 +23,7 @@
 #include <AutoRemesher/MixedIntegerLeastSquares>
 #include <AutoRemesher/QuadParameterizer>
 #include <AutoRemesher/SurfaceMesh>
+#include <core/base/logging.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -30,7 +31,9 @@
 #include <deque>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
+#include <map>
 #include <queue>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -639,6 +642,66 @@ namespace {
                 size_t c = 3 * f + l;
                 result->triangleUvs[f][l] = Vector2(uv[2 * c], uv[2 * c + 1]);
             }
+
+        // Chart ids straight from the cover: two triangles stay in one chart when
+        // the solved UVs agree at both ends of the edge they share.  After the
+        // integer snap above, sides of a cut are a whole cell apart while solver
+        // residual inside a chart is a fraction of a percent.  Kept on: the
+        // extractor does not consume these ids yet, but they are the solver's own
+        // answer and cost one pass over the triangles.
+        std::vector<size_t> parent(mesh.faceCount());
+        for (size_t f = 0; f < parent.size(); ++f)
+            parent[f] = f;
+        const std::function<size_t(size_t)> chartRoot = [&parent](size_t index) {
+            while (parent[index] != index) {
+                parent[index] = parent[parent[index]];
+                index = parent[index];
+            }
+            return index;
+        };
+        const auto uniteCharts = [&](size_t first, size_t second) {
+            const size_t a = chartRoot(first);
+            const size_t b = chartRoot(second);
+            if (a != b)
+                parent[b] = a;
+        };
+        const auto uvAtVertex = [&mesh, &uv](size_t face, size_t vertex) -> const double* {
+            for (size_t local = 0; local < 3; ++local) {
+                const size_t corner = 3 * face + local;
+                if (mesh.cornerVertex(corner) == vertex)
+                    return &uv[2 * corner];
+            }
+            return nullptr;
+        };
+        const double chartTolerance = 0.05;
+        for (size_t corner = 0; corner < mesh.cornerCount(); ++corner) {
+            const size_t opposite = mesh.oppositeCorner(corner);
+            if (opposite == SurfaceMesh::npos || corner > opposite)
+                continue;
+            const size_t first = mesh.cornerFace(corner);
+            const size_t second = mesh.cornerFace(opposite);
+            if (first == second)
+                continue;
+            const size_t v0 = mesh.cornerVertex(corner);
+            const size_t v1 = mesh.cornerVertex(mesh.nextCorner(corner));
+            const double* a0 = uvAtVertex(first, v0);
+            const double* b0 = uvAtVertex(second, v0);
+            const double* a1 = uvAtVertex(first, v1);
+            const double* b1 = uvAtVertex(second, v1);
+            if (nullptr == a0 || nullptr == b0 || nullptr == a1 || nullptr == b1)
+                continue;
+            const double difference = std::max(
+                std::max(std::fabs(a0[0] - b0[0]), std::fabs(a0[1] - b0[1])),
+                std::max(std::fabs(a1[0] - b1[0]), std::fabs(a1[1] - b1[1])));
+            if (difference <= chartTolerance)
+                uniteCharts(first, second);
+        }
+        result->triangleCharts.assign(mesh.faceCount(), 0);
+        std::map<size_t, int> chartIds;
+        for (size_t f = 0; f < mesh.faceCount(); ++f) {
+            const auto inserted = chartIds.insert({ chartRoot(f), (int)chartIds.size() });
+            result->triangleCharts[f] = inserted.first->second;
+        }
     }
 
 }
@@ -722,9 +785,13 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         if (quadFootprintSum > 0.0 && std::isfinite(quadFootprintSum)) {
             const double solved = std::sqrt(quadFootprintSum / (double)targetQuadCount);
             scale = std::min(baseScale * 3.0, std::max(baseScale / 3.0, solved));
-            if (nullptr != getenv("AR_TRACE_EXACT_TARGET"))
-                fprintf(stderr, "[exact-target] faces=%zu target=%zu solved=%.6g base=%.6g used=%.6g\n",
+            if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
+                char trace[512];
+                snprintf(trace, sizeof(trace),
+                    "[exact-target] faces=%zu target=%zu solved=%.6g base=%.6g used=%.6g\n",
                     mesh.faceCount(), targetQuadCount, solved, baseScale, scale);
+                Log::write(Log::Normal, trace);
+            }
         }
     }
 
@@ -770,9 +837,14 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         for (const size_t size : chartSizes)
             if (size > largest)
                 largest = size;
-        fprintf(stderr, "[charts] faces=%zu seamEdges=%zu charts=%zu largest=%zu (%.1f%%)\n",
-            mesh.faceCount(), seamEdges, chartSizes.size(), largest,
-            mesh.faceCount() > 0 ? 100.0 * (double)largest / (double)mesh.faceCount() : 0.0);
+        {
+            char trace[512];
+            snprintf(trace, sizeof(trace),
+                "[charts] faces=%zu seamEdges=%zu charts=%zu largest=%zu (%.1f%%)\n",
+                mesh.faceCount(), seamEdges, chartSizes.size(), largest,
+                mesh.faceCount() > 0 ? 100.0 * (double)largest / (double)mesh.faceCount() : 0.0);
+            Log::write(Log::Debug, trace);
+        }
     }
 
     // The cover solve reports on its own 0..1, so remap it into the tail of this
@@ -839,9 +911,13 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         const double extractionEfficiency = 0.955;
         const double predictedQuads = (uvArea - boundaryLossCells) * extractionEfficiency;
         const double error = predictedQuads / (double)targetQuadCount;
-        if (nullptr != getenv("AR_TRACE_EXACT_TARGET"))
-            fprintf(stderr, "[exact-target] attempt=%d scale=%.6g uvArea=%.1f boundaryLoss=%.1f predicted=%.1f target=%zu error=%.4f\n",
+        if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
+            char trace[512];
+            snprintf(trace, sizeof(trace),
+                "[exact-target] attempt=%d scale=%.6g uvArea=%.1f boundaryLoss=%.1f predicted=%.1f target=%zu error=%.4f\n",
                 attempt, scale, uvArea, boundaryLossCells, predictedQuads, targetQuadCount, error);
+            Log::write(Log::Normal, trace);
+        }
         if (std::fabs(error - 1.0) <= 0.02 || attempt + 1 == maximumCoverAttempts)
             break;
         // uvArea goes with 1/s^2 and the boundary loss with 1/s, so the next
@@ -867,8 +943,11 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
             const Vector2& d = triangle[2];
             uvArea += 0.5 * std::fabs((b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]));
         }
-        fprintf(stderr, "[exact-target] final uvArea=%.1f target=%zu ratio=%.4f\n",
+        char trace[512];
+        snprintf(trace, sizeof(trace),
+            "[exact-target] final uvArea=%.1f target=%zu ratio=%.4f\n",
             uvArea, targetQuadCount, targetQuadCount > 0 ? uvArea / (double)targetQuadCount : 0.0);
+        Log::write(Log::Normal, trace);
     }
     return true;
 }

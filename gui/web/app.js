@@ -203,6 +203,35 @@
     });
   }
 
+  // The preset dropdown is the front door to the four remeshing knobs: picking
+  // one moves the sliders to that preset's values, exactly the table the CLI
+  // applies when a flag is left out.  Moving a slider afterwards still wins.
+  var PRESETS = {
+    organic: { sharpEdge: 60, smoothNormal: 0, adaptivity: 0.5, anisotropy: 0, edgeScaling: 1 },
+    'hard-surface': { sharpEdge: 40, smoothNormal: 30, adaptivity: 0.2, anisotropy: 0, edgeScaling: 1 }
+  };
+
+  function setParamValue(name, value) {
+    var row = document.querySelector('.row[data-param="' + name + '"]');
+    if (!row) return;
+    var num = row.querySelector('.num');
+    if (!num) return;
+    num.value = String(value);
+    num.dispatchEvent(new Event('input'));
+  }
+
+  function initPresets() {
+    var row = document.querySelector('.row[data-param="modelType"]');
+    if (!row) return;
+    var sel = row.querySelector('.sel');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      var preset = PRESETS[sel.value];
+      if (!preset) return;
+      Object.keys(preset).forEach(function (name) { setParamValue(name, preset[name]); });
+    });
+  }
+
   function collectParams() {
     var out = { inputId: state.input ? state.input.id : '' };
     Object.keys(params).forEach(function (k) { out[k] = params[k]; });
@@ -421,10 +450,21 @@
     setStatus('done in ' + (e.seconds || 0).toFixed(2) + 's', 'done');
     addLog('info', 'result: ' + fmtInt(e.vertices) + ' v, ' + fmtInt(e.quads) + ' quads, ' +
       fmtInt(e.nonQuads) + ' non-quads, ' + (e.seconds || 0).toFixed(2) + 's');
+    if (e.deviation && e.deviation.samples) {
+      addLog('info', 'deviation: mean ' + fmtDev(e.deviation.mean) + ', p95 ' +
+        fmtDev(e.deviation.p95) + ', max ' + fmtDev(e.deviation.max) +
+        ' (' + fmtInt(e.deviation.samples) + ' samples)');
+    }
     if (e.output) addLog('info', 'output ' + e.output);
     renderStats(e);
     el.download.disabled = false;
     loadModel();
+  }
+
+  function fmtDev(value) {
+    if (!isFinite(value)) return '—';
+    if (value === 0) return '0';
+    return Number(value).toPrecision(3);
   }
 
   function renderStats(r) {
@@ -437,6 +477,12 @@
       ['triangles', fmtInt(r.triangles)],
       ['output', r.output || '—']
     ];
+    if (r.deviation && r.deviation.samples) {
+      var dev = r.deviation;
+      items.push(['dev mean', fmtDev(dev.mean)]);
+      items.push(['dev p95', fmtDev(dev.p95)]);
+      items.push(['dev max', fmtDev(dev.max)]);
+    }
     items.forEach(function (pair) {
       var d = document.createElement('div');
       d.className = 'stat';
@@ -550,6 +596,7 @@
   // ------------------------------------------------------------------- boot
   function boot() {
     initParams();
+initPresets();
     busy(false);
     fetch(api('/api/info'), { headers: { 'X-AR-Token': TOKEN } })
       .then(function (r) {

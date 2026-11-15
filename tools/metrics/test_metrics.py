@@ -159,6 +159,47 @@ def test_grid(tmp):
           m["valence_histogram"].get("4") == (n - 1) ** 2, str(m["valence_histogram"]))
 
 
+def test_poles_and_loops(tmp):
+    """价数/pole 分布与 edge loop 走态：立方体与平面网格上的已知答案。"""
+    p = os.path.join(tmp, "poles_cube.obj")
+    cube_obj(p)
+    m = metrics_of(p)
+    check("poles: cube expects valence 4", m["pole_expected_valence"] == 4,
+          str(m["pole_expected_valence"]))
+    check("poles: cube has 8 interior poles", m["pole_count"] == 8, str(m["pole_count"]))
+    check("poles: cube interior count", m["interior_vertices"] == 8, str(m["interior_vertices"]))
+    check("poles: cube poles cluster", m["pole_clusters"] == 1, str(m["pole_clusters"]))
+    check("poles: cube cluster holds all 8", m["pole_cluster_max"] == 8, str(m["pole_cluster_max"]))
+    check("loops: valence-3 cube has none", m["edge_loops"] == 0 and m["edge_loop_open_bands"] == 0,
+          "%d closed / %d open" % (m["edge_loops"], m["edge_loop_open_bands"]))
+
+    g = os.path.join(tmp, "poles_grid.obj")
+    grid_obj(g, 4)
+    mg = metrics_of(g)
+    check("poles: grid has none", mg["pole_count"] == 0, str(mg["pole_count"]))
+    check("poles: grid interior 9", mg["interior_vertices"] == 9, str(mg["interior_vertices"]))
+    check("loops: grid chains 3 rows + 3 cols", mg["edge_loop_open_bands"] == 6,
+          str(mg["edge_loop_open_bands"]))
+    check("loops: grid chains 4 edges long", approx(mg["edge_loop_length_p50"], 4.0),
+          str(mg["edge_loop_length_p50"]))
+    check("loops: flat grid turns 0 deg", approx(mg["edge_loop_turn_mean_deg"], 0.0, 1e-9),
+          str(mg["edge_loop_turn_mean_deg"]))
+    check("loops: flat grid dihedral 0 deg", approx(mg["edge_loop_dihedral_p95_deg"], 0.0, 1e-9),
+          str(mg["edge_loop_dihedral_p95_deg"]))
+
+    o = os.path.join(tmp, "poles_octa.obj")
+    verts = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+    faces = [[1, 3, 5], [3, 2, 5], [2, 4, 5], [4, 1, 5],
+             [3, 1, 6], [2, 3, 6], [4, 2, 6], [1, 4, 6]]
+    write_obj(o, verts, faces)
+    mo = metrics_of(o)
+    check("poles: tri mesh expects valence 6", mo["pole_expected_valence"] == 6,
+          str(mo["pole_expected_valence"]))
+    check("poles: octahedron 6 poles", mo["pole_count"] == 6, str(mo["pole_count"]))
+    check("loops: tri mesh has no quad loops", mo["edge_loops"] == 0,
+          str(mo["edge_loops"]))
+
+
 def test_two_islands(tmp):
     p = os.path.join(tmp, "islands.obj")
     verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (5, 0, 0), (6, 0, 0), (5, 1, 0)]
@@ -303,8 +344,8 @@ def test_cli(tmp):
 
 def main():
     tmpdir = tempfile.mkdtemp(prefix="mesh_metrics_test_")
-    tests = [test_parse_features, test_cube, test_grid, test_two_islands,
-             test_nonmanifold, test_degenerate, test_normal_flip,
+    tests = [test_parse_features, test_cube, test_grid, test_poles_and_loops,
+             test_two_islands, test_nonmanifold, test_degenerate, test_normal_flip,
              test_deviation_identical, test_deviation_offset,
              test_compare_modes, test_cli]
     for t in tests:

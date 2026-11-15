@@ -71,9 +71,17 @@ jobs:
         run: cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build/cli --config Release --parallel
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Smoke test
         shell: cmd
         run: build\cli\dist\autoremesher.exe --version
+      - name: CLI JSON contract
+        # The GUI and every script read this envelope: input event, warnings,
+        # result with topology/holes/patches/phases, a silent --quiet and an
+        # --exact-target-quads that lands near the requested count.
+        run: python tools/smoke_cli.py build\cli\dist\autoremesher.exe
 
   metrics:
     name: metrics (toolkit self-tests)

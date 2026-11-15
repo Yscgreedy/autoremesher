@@ -355,14 +355,40 @@ bool QuadExtractor::extract()
             Log::write(Log::Debug, "Local topology optimisation applied " + std::to_string(applied) + " operation(s), " + std::to_string(patches) + " patch(es)");
         rebuildHalfEdges();
     }
+    // The twelve cleanup passes above reconnect faces one at a time, and their
+    // moves can leave a boundary behind: at a 6k budget the mesh still came out
+    // with 19 open edges in one loop although every hole the extractor itself
+    // created had been sealed.  A closed input gets one last look, after the last
+    // pass that can open it, and before the aspect clamp so the caps it adds are
+    // clamped like everything else.
+    if (m_sealClosedInputHoles) {
+        // Duplicate cross points first: a boundary walk that visits one vertex
+        // twice cannot be capped, only welded.
+        weldCoincidentVertices();
+    }
     if (m_cleanDegenerate) {
         validateRemeshedMesh();
-        // After validate, never before: the clamp merges vertices itself, and it
-        // wants the mesh the validate pass already welded and de-duplicated, or it
-        // would chase zero length sides validate is about to remove anyway.
-        if (m_maximumAspect > 0.0)
-            clampQuadAspect(m_maximumAspect);
     }
+    // Seal after validate, not before it: validate merges vertices and drops the
+    // faces such a merge degenerates, and at a 6k budget that is exactly what
+    // re-opened 19 edges behind a seal that had already closed everything (the
+    // debug trace shows "Searching boundaries done", then "welded 8, removed 15
+    // degenerate" - and 19 open edges in the file).
+    if (m_sealClosedInputHoles) {
+        rebuildHalfEdges();
+        fixHoles();
+        // Deliberately no removeIsolatedFaces() here: it keeps only the largest
+        // island, which does clean up the one-face debris a cap can leave behind -
+        // but at a 20k budget it also dropped a real patch (patches.dropped 0 -> 1,
+        // same shell count), and on a model that is genuinely two parts it would
+        // delete half of it.  The debris shows up as an extra shell in the report
+        // instead, which is the honest reading.
+    }
+    // The clamp runs last: its collapses keep the mesh manifold by construction
+    // (it rejects any collapse that would give an edge a third face), so it cannot
+    // undo the seal above, and it is the pass whose result the caller checks.
+    if (m_cleanDegenerate && m_maximumAspect > 0.0)
+        clampQuadAspect(m_maximumAspect);
     report(1.0f, "");
 
     // A uv the passes could not follow is worth less than no uv at all: the
@@ -1466,6 +1492,21 @@ void QuadExtractor::fixHoles()
     const double smallEdges = m_holeSmallEdges * edgeScale;
     const double largeEdges = m_holeLargeEdges * edgeScale;
     for (auto& loop : loops) {
+        // A closed input cannot have a legitimate hole.  Every loop here is then
+        // what the cover left uncovered - at a 6k budget that is 8 loops of 82
+        // edges each, all above the 65 edge threshold, so all of them used to be
+        // ignored and the caller got 658 boundary edges and two shells back.
+        // Sealing them costs about half their perimeter in faces, which also moves
+        // the quad count towards the budget instead of away from it.
+        if (m_sealClosedInputHoles && (double)loop.size() > smallEdges) {
+            Log::write(Log::Debug, "Sealing hole of closed input at length:"
+                    + std::to_string(loop.size()));
+            const size_t added = fillHoleGraded(loop, largeEdges, true);
+            gradedFaces += added;
+            recordFilledHole(added);
+            ++m_extractionStats.holesSealedClosedInput;
+            continue;
+        }
         if (m_gradedHoleFilling && (double)loop.size() > smallEdges
             && ((double)loop.size() <= largeEdges || m_projectedHoleCaps)) {
             // The greedy quad pass gives up as soon as its best corner score is
@@ -1484,11 +1525,28 @@ void QuadExtractor::fixHoles()
             continue;
         }
         Log::write(Log::Debug, "Fixing hole at length:" + std::to_string(loop.size()));
+        // fixHoleWithQuads() consumes the loop it is given, so the fallback below
+        // needs its own copy to offer the cap a loop it has not been trimmed down.
+        const std::vector<size_t> loopBeforeGreedy(loop);
         const size_t facesBeforeHole = m_remeshedPolygons.size();
         fixHoleWithQuads(loop, true);
         if (loop.size() >= 4)
             fixHoleWithQuads(loop, false);
-        recordFilledHole(m_remeshedPolygons.size() - facesBeforeHole);
+        const size_t greedyAdded = m_remeshedPolygons.size() - facesBeforeHole;
+        if (0 == greedyAdded && m_sealClosedInputHoles && loopBeforeGreedy.size() > 2) {
+            // The greedy cap gives up when its best corner scores non-positive or
+            // when the quad it wants would land on an existing face, and it says so
+            // by adding nothing.  On a closed input that hole is still an artifact,
+            // so it gets the same cap the long ones get; without this the mesh kept
+            // 19 open edges in a loop the report counted as neither filled nor
+            // ignored (holesIgnored 0, boundary 19).
+            const size_t added = fillHoleGraded(loopBeforeGreedy, largeEdges, true);
+            gradedFaces += added;
+            recordFilledHole(added);
+            ++m_extractionStats.holesSealedClosedInput;
+            continue;
+        }
+        recordFilledHole(greedyAdded);
     }
     if (m_gradedHoleFilling && gradedFaces > 0) {
         Log::write(Log::Debug, "Graded hole filling added " + std::to_string(gradedFaces) + " face(s)");
@@ -1496,7 +1554,8 @@ void QuadExtractor::fixHoles()
     }
 }
 
-size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole, double largeHoleEdges)
+size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole, double largeHoleEdges,
+    bool allowProjectedRing)
 {
     if (hole.size() < 3)
         return 0;
@@ -1533,7 +1592,8 @@ size_t QuadExtractor::fillHoleGraded(const std::vector<size_t>& hole, double lar
         perimeter += (m_remeshedVertices[polygon[i]] - m_remeshedVertices[polygon[(i + 1) % count]]).length();
     const double averageEdge = perimeter / (double)count;
 
-    const bool useProjectedRing = m_projectedHoleCaps && (double)count > largeHoleEdges;
+    const bool useProjectedRing = (m_projectedHoleCaps || allowProjectedRing)
+        && (double)count > largeHoleEdges;
     const size_t firstNewVertex = m_remeshedVertices.size();
     if (useProjectedRing) {
         // Snap the apex and the mid ring onto the source surface: the input is
@@ -2915,6 +2975,13 @@ void QuadExtractor::searchBoundaries(const std::set<std::pair<size_t, size_t>>& 
         nextMap[it.first].insert(it.second);
     }
 
+    // A vertex with more than one outgoing boundary edge is a pinch: two loops
+    // touching at one point, which is what the cleanup passes leave when a
+    // duplicated cross point makes a vertex carry four open edges.  Such a loop is
+    // skipped rather than capped - measured on the shoe, capping it added faces
+    // onto edges that already had two, i.e. it traded 19 open edges for 5
+    // non-manifold ones.  The residual is reported instead of hidden: the file
+    // keeps its open edges and the report says how many.
     while (!nextMap.empty()) {
         auto it = nextMap.begin();
         std::vector<size_t> loop;
@@ -3290,6 +3357,156 @@ void QuadExtractor::validateRemeshedMesh()
         || m_extractionStats.weldedVertices > 0) {
         Log::write(Log::Debug, "Validate: welded " + std::to_string(m_extractionStats.weldedVertices) + " vertex/vertices, removed " + std::to_string(m_extractionStats.degenerateFacesRemoved) + " degenerate and " + std::to_string(m_extractionStats.duplicateFacesRemoved) + " duplicate face(s)");
     }
+}
+
+
+// Vertices that sit on the same point but never share a face: the validate pass
+// welds along face edges only, so a cleanup pass that copies a cross point instead
+// of reusing it leaves a pair behind that it cannot see.  On a 6k budget that was
+// 19 open edges in three boundary walks, with vertices 2e-5 apart and two of them
+// on exactly the same position - and a loop that walks through the same vertex
+// twice is a figure eight, which fillHoleGraded() cannot cap without folding.
+size_t QuadExtractor::weldCoincidentVertices()
+{
+    if (m_remeshedVertices.size() < 2 || m_remeshedPolygons.empty())
+        return 0;
+    const double meanEdge = remeshedMeanEdgeLength();
+    if (!(meanEdge > 0.0))
+        return 0;
+    // One hundredth of an output edge.  Far below the shortest feature a quad mesh
+    // can resolve, far above the gap the passes leave between a copy and its
+    // original (measured 2e-5 against a 4.8e-3 edge on the shoe).
+    const double tolerance = 0.01 * meanEdge;
+    if (!(tolerance > 0.0))
+        return 0;
+
+    // Only vertices on an open edge are candidates.  A merge anywhere else buys
+    // nothing - the interior is already closed - and it is not free: two vertices
+    // that each carry two faces can end up sharing three faces on one edge, which
+    // is a non-manifold edge in exchange for a hole that was not there.
+    std::map<std::pair<size_t, size_t>, size_t> edgeUse;
+    for (const auto& face : m_remeshedPolygons) {
+        const size_t count = face.size();
+        for (size_t i = 0; i < count; ++i) {
+            const size_t first = face[i];
+            const size_t second = face[(i + 1) % count];
+            if (first == second)
+                continue;
+            ++edgeUse[first < second ? std::make_pair(first, second) : std::make_pair(second, first)];
+        }
+    }
+    std::vector<unsigned char> onOpenEdge(m_remeshedVertices.size(), 0);
+    size_t openEdgeCount = 0;
+    for (const auto& it : edgeUse) {
+        if (it.second != 1)
+            continue;
+        ++openEdgeCount;
+        onOpenEdge[it.first.first] = 1;
+        onOpenEdge[it.first.second] = 1;
+    }
+    if (0 == openEdgeCount)
+        return 0;
+
+    // Which faces each vertex belongs to, so two vertices used by one face are
+    // never merged: that would collapse the face into a degenerate one and open a
+    // hole in exchange for the one being closed.
+    std::vector<std::vector<size_t>> facesOfVertex(m_remeshedVertices.size());
+    for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
+        for (const size_t vertex : m_remeshedPolygons[faceIndex]) {
+            if (vertex < facesOfVertex.size())
+                facesOfVertex[vertex].push_back(faceIndex);
+        }
+    }
+    const auto shareFace = [&facesOfVertex](size_t first, size_t second) {
+        const auto& a = facesOfVertex[first];
+        const auto& b = facesOfVertex[second];
+        if (a.empty() || b.empty())
+            return false;
+        size_t i = 0;
+        size_t j = 0;
+        while (i < a.size() && j < b.size()) {
+            if (a[i] == b[j])
+                return true;
+            if (a[i] < b[j])
+                ++i;
+            else
+                ++j;
+        }
+        return false;
+    };
+
+    // A hash grid at the tolerance: every candidate pair is inside one cell or in
+    // the 26 around it, so this stays linear in the vertex count.
+    std::unordered_map<long long, std::vector<size_t>> grid;
+    grid.reserve(m_remeshedVertices.size() * 2);
+    const auto cellCoordinate = [tolerance](double value) {
+        return (long long)std::floor(value / tolerance);
+    };
+    // A mixed hash, not a packed index: a collision only costs one extra distance
+    // test, while a pack overflow would silently alias two far apart cells.
+    const auto cellKey = [](long long x, long long y, long long z) {
+        return (x * 73856093ll) ^ (y * 19349663ll) ^ (z * 83492791ll);
+    };
+    std::vector<size_t> parent(m_remeshedVertices.size());
+    for (size_t i = 0; i < parent.size(); ++i)
+        parent[i] = i;
+    std::function<size_t(size_t)> findRoot;
+    findRoot = [&parent, &findRoot](size_t index) {
+        size_t root = index;
+        while (parent[root] != root)
+            root = parent[root];
+        while (parent[index] != root) {
+            const size_t next = parent[index];
+            parent[index] = root;
+            index = next;
+        }
+        return root;
+    };
+    size_t merged = 0;
+    for (size_t i = 0; i < m_remeshedVertices.size(); ++i) {
+        if (!onOpenEdge[i])
+            continue;
+        const Vector3& vertex = m_remeshedVertices[i];
+        const long long x = cellCoordinate(vertex.x());
+        const long long y = cellCoordinate(vertex.y());
+        const long long z = cellCoordinate(vertex.z());
+        // The 27 cells around it: a pair just under the tolerance apart can still
+        // straddle a cell boundary, and missing it is the difference between a
+        // sealed mesh and the same 19 open edges.
+        for (long long dx = -1; dx <= 1; ++dx) {
+            for (long long dy = -1; dy <= 1; ++dy) {
+                for (long long dz = -1; dz <= 1; ++dz) {
+                    const auto bucket = grid.find(cellKey(x + dx, y + dy, z + dz));
+                    if (grid.end() == bucket)
+                        continue;
+                    for (const size_t other : bucket->second) {
+                        if ((m_remeshedVertices[other] - vertex).length() > tolerance)
+                            continue;
+                        if (shareFace(other, i))
+                            continue;
+                        const size_t firstRoot = findRoot(other);
+                        const size_t secondRoot = findRoot(i);
+                        if (firstRoot == secondRoot)
+                            continue;
+                        parent[secondRoot] = firstRoot;
+                        ++merged;
+                    }
+                }
+            }
+        }
+        grid[cellKey(x, y, z)].push_back(i);
+    }
+    if (0 == merged)
+        return 0;
+    for (auto& face : m_remeshedPolygons) {
+        for (auto& index : face) {
+            if (index < parent.size())
+                index = findRoot(index);
+        }
+    }
+    m_extractionStats.weldedVertices += merged;
+    Log::write(Log::Debug, "Welded " + std::to_string(merged) + " coincident vertex/vertices");
+    return merged;
 }
 
 double QuadExtractor::remeshedMeanEdgeLength() const
@@ -3695,6 +3912,15 @@ void QuadExtractor::clampQuadAspect(double maximumAspect)
     m_extractionStats.facesTooLongRemaining = tooLong;
     if (m_extractionStats.aspectClampedEdges > 0 || tooLong > 0) {
         Log::write(Log::Debug, "Aspect clamp: " + std::to_string(m_extractionStats.aspectClampedEdges) + " collapse(s) on " + std::to_string(m_extractionStats.aspectClampedFaces) + " face(s), " + std::to_string(m_extractionStats.aspectRejectedFaces) + " rejected, " + std::to_string(tooLong) + " quad(s) still over " + std::to_string(maximumAspect));
+    }
+    // Not a debug line: a face over the threshold the caller stated is a promise
+    // kept or broken, and it used to be visible only with --log-level debug.  The
+    // residual is structural - collapsing the short side would give some edge a
+    // third face - so saying "the clamp is best effort" is the honest report.
+    if (tooLong > 0) {
+        Log::write(Log::Normal, "Aspect clamp: " + std::to_string(tooLong)
+                + " quad(s) still over " + std::to_string(maximumAspect)
+                + " - their short side cannot be collapsed without giving an edge a third face");
     }
 }
 

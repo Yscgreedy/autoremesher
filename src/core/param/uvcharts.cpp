@@ -345,7 +345,7 @@ namespace {
 UvPackResult packUvCharts(const std::vector<std::vector<size_t>>& faces,
     std::vector<std::vector<Vector2>>* faceUvs,
     std::vector<Vector2>* vertexUvs,
-    double margin)
+    double margin, size_t maxChartFaces)
 {
     UvPackResult result;
     if (nullptr == faceUvs || faceUvs->size() != faces.size() || faces.empty())
@@ -462,12 +462,24 @@ UvPackResult packUvCharts(const std::vector<std::vector<size_t>>& faces,
         chartOfFace[seed] = chartCount;
         pending.clear();
         pending.push_back(seed);
+        size_t chartFaces = 1;
         while (!pending.empty()) {
             const size_t current = pending.back();
             pending.pop_back();
+            // A chart is only as good as its accumulated offset: the per-face UVs
+            // inside it agree only up to the cover's own extrapolation error, and
+            // that error is what a bake sees as two faces fighting over a texel.
+            // Capping the face count caps the accumulated error, at the price of
+            // more (smaller) charts.  A cap of 1 makes every face its own chart,
+            // which is the layout with no intra-chart error at all.
+            if (maxChartFaces > 0 && chartFaces >= maxChartFaces)
+                break;
             for (const auto& neighbour : neighbours[current]) {
                 if (chartOfFace[neighbour.first] != (size_t)-1)
                     continue;
+                if (maxChartFaces > 0 && chartFaces >= maxChartFaces)
+                    break;
+                ++chartFaces;
                 chartOfFace[neighbour.first] = chartCount;
                 offsetOfFace[neighbour.first] = Vector2(
                     offsetOfFace[current].x() + neighbour.second.x(),
@@ -534,7 +546,13 @@ UvPackResult packUvCharts(const std::vector<std::vector<size_t>>& faces,
             return firstHeight > secondHeight;
         return first < second;
     });
-    const double gap = std::max(1e-9, margin);
+    // A negative margin is the relative form: 5% of the average item size.  An
+    // absolute gap cannot serve both ends - one chart of a whole island and a
+    // thousand one-face items - without either overflowing the bin or collapsing
+    // the layout into a sliver of the cover.
+    const double gap = (margin >= 0.0)
+        ? std::max(1e-9, margin)
+        : std::max(1e-9, 0.05 * std::sqrt(totalArea / (double)order.size()));
     const double packedArea = totalArea > 0.0 ? totalArea : 1.0;
     double binWidth = std::max(widest, std::sqrt(packedArea) * 1.15);
     binWidth = std::max(binWidth, 1e-9);

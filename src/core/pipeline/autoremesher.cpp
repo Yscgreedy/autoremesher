@@ -913,8 +913,15 @@ bool AutoRemesher::remesh()
                         thread.remesher->setGradedHoleFilling(true);
                     if (thread.autoRemesher->m_projectedHoleCaps)
                         thread.remesher->setProjectedHoleCaps(true);
+                    // Analyze input has already run by now, so this is the input's
+                    // own boundary count and not the output's.
+                    if (thread.autoRemesher->m_sealClosedInputHoles
+                        && 0 == thread.autoRemesher->m_inputStats.boundaryEdges
+                        && thread.autoRemesher->m_inputStats.components >= 1)
+                        thread.remesher->setSealClosedInputHoles(true);
                     if (thread.autoRemesher->m_localRemesh)
                         thread.remesher->setLocalRemesh(true);
+                    thread.remesher->setCleanDegenerate(thread.autoRemesher->m_cleanDegenerate);
                     if (thread.autoRemesher->m_maximumAspect > 0.0)
                         thread.remesher->setMaximumAspect(thread.autoRemesher->m_maximumAspect);
                     if (thread.autoRemesher->m_relativePositionTolerance) {
@@ -1275,11 +1282,19 @@ bool AutoRemesher::remesh()
     // stop two charts from occupying the same square, which is exactly what makes
     // a bake smear.  Pack chart by chart afterwards, and keep the numbers so the
     // report can say what happened.
-    m_uvPackResult = UvPackResult();
-    if (m_exportUvs && m_uvPacking && !m_remeshedFaceUvs.empty()) {
-        m_uvPackResult = packUvCharts(m_remeshedQuads, &m_remeshedFaceUvs,
-            &m_remeshedVertexUvs, 0.01);
-    }
+    // One place that knows how to pack, so the call after the symmetry pass cannot
+    // drift from the call before it.  A negative margin is the packer's relative
+    // form: with thousands of one-face items an absolute gap either overflows the
+    // bin or shrinks the layout into a corner of the cover.
+    const auto packUvs = [this]() {
+        m_uvPackResult = UvPackResult();
+        if (m_exportUvs && m_uvPacking && !m_remeshedFaceUvs.empty()) {
+            m_uvPackResult = packUvCharts(m_remeshedQuads, &m_remeshedFaceUvs,
+                &m_remeshedVertexUvs, m_uvPackItemFaces > 0 ? -1.0 : 0.01,
+                m_uvPackItemFaces);
+        }
+    };
+    packUvs();
 
     // Symmetry is applied last, on the merged mesh: the cut and the mirror have to
     // see the whole model, not one island at a time.
@@ -1337,6 +1352,12 @@ bool AutoRemesher::remesh()
             m_remeshedQuads = std::move(mirrored.faces);
             m_remeshedFaceUvs = std::move(mirrored.faceUvs);
             m_remeshedVertexUvs = std::move(mirrored.vertexUvs);
+            // The mirror copies the kept half's UVs onto the new half, so every
+            // mirrored face lands exactly on top of its source: measured 2417 pairs
+            // of faces sharing one UV polygon and overlap_pct 100.  Packing before
+            // the mirror cannot fix that - the duplicated UVs do not exist yet - so
+            // the layout is packed again, over the whole mesh, once it does.
+            packUvs();
         }
     }
 
@@ -1349,6 +1370,11 @@ bool AutoRemesher::remesh()
     // "3 holes filled, 1 left open, 2 patches dropped" instead of leaving the
     // user to count boundary edges in another tool.
     m_holeStats = HoleStats();
+    m_aspectStats = AspectStats();
+    // The threshold the run actually used: 0 when the clamp never ran, which is
+    // what makes tooLongRemaining == 0 mean "nothing to report" rather than
+    // "nothing was checked".
+    m_aspectStats.threshold = (m_cleanDegenerate && m_maximumAspect > 0.0) ? m_maximumAspect : 0.0;
     m_patchStats = PatchStats();
     for (const auto& thread : parameterizationThreads) {
         if (nullptr == thread.remesher)
@@ -1357,6 +1383,11 @@ bool AutoRemesher::remesh()
         m_holeStats.filled += stats.holesFilled;
         m_holeStats.ignored += stats.holesIgnored;
         m_holeStats.facesAdded += stats.holeFacesAdded;
+        m_holeStats.sealedClosedInput += stats.holesSealedClosedInput;
+        m_aspectStats.collapses += stats.aspectClampedEdges;
+        m_aspectStats.faces += stats.aspectClampedFaces;
+        m_aspectStats.rejected += stats.aspectRejectedFaces;
+        m_aspectStats.tooLongRemaining += stats.facesTooLongRemaining;
         m_patchStats.kept += stats.patchesKept;
         m_patchStats.dropped += stats.patchesDropped;
         m_patchStats.weldedVertices += stats.weldedVertices;

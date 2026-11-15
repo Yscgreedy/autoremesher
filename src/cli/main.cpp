@@ -7,10 +7,21 @@
  * the Go GUI can drive it without any Qt code in the process.
  */
 #include <AutoRemesher/AutoRemesher>
+#include <AutoRemesher/MeshSymmetry>
 #include <AutoRemesher/UvCharts>
 #include <AutoRemesher/Vector2>
 #include <AutoRemesher/Vector3>
 #include <core/base/logging.h>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -159,12 +170,19 @@ struct Options {
     std::set<std::string> explicitFlags;
     // Chart-aware UV packing; --no-uv-pack restores the historical strip layout.
     bool uvPacking = true;
+    // 0 = pack by chart (historical), 1 = pack every face on its own (bakeable,
+    // a seam on every edge); see AutoRemesher::setUvPackItemFaces.
+    size_t uvPackItemFaces = 0;
     // 0 = the budget loop's own policy; 1 = one cover solve per island.
     int coverAttempts = 0;
     // 0 = full 3F curl correction, 1 = 2F (faster, worse worst-case deviation).
     int curlMode = 0;
     // Degenerate cleanup: zero length edges, degenerate and duplicate faces.
     bool cleanDegenerate = true;
+    // Seal every hole when the input itself had no boundary: the loops are
+    // extraction artifacts then, and at a low quad budget they used to be handed
+    // back as hundreds of boundary edges and several shells.
+    bool sealClosedInputHoles = true;
     // The consumer contract asks for quad_aspect_max <= --max-aspect with 20 as
     // the default, so 20 is the default here; --max-aspect 0 keeps every sliver.
     double maxAspect = 20.0;
@@ -232,6 +250,11 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)\n"
                      "      --no-uv                 do not write vt lines\n"
                      "      --no-normals            do not write vn lines\n"
+                     "      --uv-pack-items I       chart | face: how the layout is packed. chart (default)\n"
+                     "                              keeps the cover's charts whole; face gives every face its\n"
+                     "                              own box, which is the only layout with no intra-chart\n"
+                     "                              overlap (bakeable, at a seam on every edge);\n"
+                     "                              --no-uv-pack restores the unstripped historical layout\n"
                      "      --uv-mode M             corner | vertex | hybrid | seam (default corner):\n"
                      "                              corner lays one UV per face corner from the cover\n"
                      "                              chart, vertex shares the extractor's per-vertex\n"
@@ -275,6 +298,9 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "      --graded-holes          graded hole filling (default)\n"
                      "      --legacy-holes          fixed fan hole filling\n"
                      "      --projected-caps        seal large holes with projected caps\n"
+                     "      --no-seal-closed-holes  keep the 8/65 edge hole thresholds even when\n"
+                     "                              the input was closed (default: seal everything\n"
+                     "                              there, because a closed input has no real hole)\n"
                      "      --local-remesh          energy guided topology pass\n"
                      "      --clean-degenerate      weld zero length edges and drop degenerate or\n"
                      "                              duplicate faces at the end of extraction (default)\n"
@@ -285,14 +311,22 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "                              and solves 2F instead of 3F (about 3x faster on a\n"
                      "                              20k target, larger worst-case deviation)\n"
                      "      --max-aspect F          collapse sliver quads whose max/min edge ratio\n"
-                     "                              exceeds F (default 20; 0 keeps every sliver)\n"
+                     "                              exceeds F (default 20; 0 keeps every sliver).\n"
+                     "                              Best effort, not a guarantee: applies to quads\n"
+                     "                              only (triangles and n-gons are untouched), runs\n"
+                     "                              once at the end of extraction, and a quad whose\n"
+                     "                              short side cannot be collapsed without giving\n"
+                     "                              an edge a third face is left alone - those are\n"
+                     "                              counted in aspect_clamp.too_long_remaining\n"
                      "      --threads N             pin the TBB worker count (0 = all cores)\n"
                      "\n"
                      "Reporting:\n"
                      "      --json                  JSON-lines events on stdout (see docs/cli-protocol.md)\n"
                      "      --check-only            analyse the input and exit: area/volume/bbox/unit\n"
-                     "                              guess/shell count and parameter advice, no output\n"
-                     "                              file and no remesh (result carries checkOnly)\n"
+                     "                              guess/shell count, parameter advice and the symmetry\n"
+                     "                              match_pct of all three axes (or of --symmetry AXIS),\n"
+                     "                              so whether to turn symmetry on is decided here and\n"
+                     "                              not after a full run; no output file, no remesh\n"
                      "      --preset-file PATH      JSON file of knob overrides, applied after the preset\n"
                      "      --unit-hint U           mm | cm | m: only changes the units the report prints\n"
                      "                              result carries topology, holes, patches, phases\n"
@@ -491,6 +525,9 @@ bool applyPresetFile(const std::string& path, Options* options, int* exitCode)
         } else if (key == "cleanDegenerate" && flag) {
             if (!namedAny({ "--clean-degenerate", "--no-clean-degenerate" }))
                 options->cleanDegenerate = (value == "true");
+        } else if (key == "sealClosedInputHoles" && flag) {
+            if (!namedAny({ "--seal-closed-holes", "--no-seal-closed-holes" }))
+                options->sealClosedInputHoles = (value == "true");
         } else if (key == "writeUvs" && flag) {
             if (!namedAny({ "--no-uv" }))
                 options->writeUvs = (value == "true");
@@ -621,6 +658,21 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->gradedHoles = false;
         } else if (arg == "--projected-caps") {
             options->projectedCaps = true;
+        } else if (arg == "--uv-pack-items") {
+            const std::string items = value();
+            if (items == "chart" || items == "chart-per-island")
+                options->uvPackItemFaces = 0;
+            else if (items == "face" || items == "per-face")
+                options->uvPackItemFaces = 1;
+            else {
+                fprintf(stderr, "unknown uv pack item '%s' (chart|face)\n", items.c_str());
+                *exitCode = 1;
+                return false;
+            }
+        } else if (arg == "--no-seal-closed-holes") {
+            options->sealClosedInputHoles = false;
+        } else if (arg == "--seal-closed-holes") {
+            options->sealClosedInputHoles = true;
         } else if (arg == "--local-remesh") {
             options->localRemesh = true;
         } else if (arg == "--threads") {
@@ -1120,6 +1172,28 @@ std::vector<AutoRemesher::Vector3> computeVertexNormals(
     return normals;
 }
 
+// Renaming onto an existing file is part of the contract: a pipeline that reruns
+// into the same path has to get the new mesh, not "failed to move".  std::rename
+// replaces on POSIX but fails on Windows the moment the target exists, which made
+// the second run of any fixed-name SOP fail with exit 3.  Windows therefore goes
+// through MoveFileEx with MOVEFILE_REPLACE_EXISTING; the write-then-replace order
+// still means a cancelled run never leaves a half-written OBJ behind.
+bool replaceFile(const std::string& from, const std::string& to)
+{
+#if defined(_WIN32)
+    if (0 != ::MoveFileExA(from.c_str(), to.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return true;
+    // A read-only attribute on the old result is the one common reason the replace
+    // is refused; dropping the file and retrying keeps the caller's path usable.
+    if (0 == std::remove(to.c_str()))
+        return 0 == std::rename(from.c_str(), to.c_str());
+    return false;
+#else
+    return 0 == std::rename(from.c_str(), to.c_str());
+#endif
+}
+
 bool writeObj(const std::string& path,
     const std::vector<AutoRemesher::Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
@@ -1278,7 +1352,7 @@ bool writeObj(const std::string& path,
     }
     // The rename is what makes the result appear: until this line the caller's
     // path does not exist, so a cancel in the middle leaves nothing to pick up.
-    if (0 != std::rename(temporaryPath.c_str(), path.c_str())) {
+    if (!replaceFile(temporaryPath, path)) {
         std::remove(temporaryPath.c_str());
         *error = "failed to move the written mesh onto " + displayPath(path);
         return false;
@@ -1580,12 +1654,36 @@ std::string budgetJson(const Options& options, size_t quads, double error,
 {
     std::ostringstream out;
     out.setf(std::ios::fixed);
+    // The budget is a face budget: a target of 20000 means 20000 faces, of which
+    // some come out as triangles and pentagons because the cleanup passes could not
+    // pair them.  Reporting only the quad count left a 12% "shortfall" unexplained
+    // when the face count was within 1% - so both are reported, and the suggestion
+    // says which of the two missed.
+    const double faceError = (options.targetQuads > 0)
+        ? ((double)outputStats.faces - (double)options.targetQuads) / (double)options.targetQuads
+        : 0.0;
     out << "{\"requested\":" << options.targetQuads
         << ",\"actual\":" << quads
         << ",\"error\":" << std::setprecision(4) << error
         << ",\"withinTolerance\":" << (std::fabs(error) <= 0.05 ? "true" : "false")
+        << ",\"faces\":" << outputStats.faces
+        << ",\"face_error\":" << std::setprecision(4) << faceError
+        << ",\"faces_within_tolerance\":" << (std::fabs(faceError) <= 0.05 ? "true" : "false")
         << ",\"mode\":\"" << (options.exactTargetQuads ? "solved" : "average-edge-length") << "\""
         << ",\"non_quads\":" << outputStats.nonQuads
+        // A caller that reads withinTolerance:false has to decide what to do about
+        // it, and the answer depends on which count missed: a face shortfall is what
+        // the cover could not spend, while a quad shortfall with the faces on target
+        // is the non-quads the cleanup passes left and no budget will fix.
+        << ",\"suggestion\":\""
+        << (std::fabs(error) <= 0.05
+                   ? ""
+                   : (std::fabs(faceError) <= 0.05
+                             ? "the face count is within tolerance; the gap is the non-quad faces the cleanup passes left, not the budget"
+                             : (error < 0.0
+                                       ? "raise --target-quads; the cover could not spend the budget on this mesh at this density"
+                                       : "lower --target-quads; the cover overshot the budget by more than the tolerance")))
+        << "\""
         << "}";
     return out.str();
 }
@@ -1612,9 +1710,11 @@ std::string effectiveParamsJson(const Options& options)
         << ",\"projectedCaps\":" << (options.projectedCaps ? "true" : "false")
         << ",\"localRemesh\":" << (options.localRemesh ? "true" : "false")
         << ",\"cleanDegenerate\":" << (options.cleanDegenerate ? "true" : "false")
+        << ",\"sealClosedInputHoles\":" << (options.sealClosedInputHoles ? "true" : "false")
         << ",\"maxAspect\":" << options.maxAspect
         << ",\"threads\":" << options.threads
         << ",\"uvMode\":\"" << jsonEscape(options.uvMode) << "\""
+        << ",\"uvPackItems\":\"" << (options.uvPackItemFaces > 0 ? "face" : (options.uvPacking ? "chart" : "none")) << "\""
         << ",\"writeUvs\":" << (options.writeUvs ? "true" : "false")
         << ",\"writeNormals\":" << (options.writeNormals ? "true" : "false")
         << ",\"symmetryMode\":\"" << jsonEscape(options.symmetryMode) << "\""
@@ -1634,7 +1734,8 @@ void reportTargetHealth(const Options& options, size_t requested, size_t actual,
         std::ostringstream message;
         message << holes.ignored
                 << " hole(s) were left open: a boundary loop longer than 65 edges is only sealed "
-                << "with --projected-caps";
+                << "with --projected-caps, or automatically when the input was closed "
+                << "(--no-seal-closed-holes turns that off)";
         emitWarning(options, "holes_left_open", message.str(), (long long)holes.ignored);
     }
     if (requested > 0) {
@@ -1849,6 +1950,8 @@ int main(int argc, char** argv)
     remesher.setWeldPatches(options.weldPatches);
     remesher.setGradedHoleFilling(options.gradedHoles);
     remesher.setProjectedHoleCaps(options.projectedCaps);
+    remesher.setSealClosedInputHoles(options.sealClosedInputHoles);
+    remesher.setCleanDegenerate(options.cleanDegenerate);
     remesher.setLocalRemesh(options.localRemesh);
     remesher.setMaximumAspect(options.maxAspect);
     remesher.setCoverAttempts(options.coverAttempts);
@@ -1866,6 +1969,7 @@ int main(int argc, char** argv)
     // connectivity, so it keeps the historical layout for now; --uv-mode seam is
     // the mode that is meant to be baked.
     remesher.setUvPacking(options.uvPacking && !(options.uvMode == "vertex" || options.uvMode == "seam"));
+    remesher.setUvPackItemFaces(options.uvPackItemFaces);
     remesher.setMeasureDeviation(options.measureDeviation);
     if (options.uvMode == "seam" && options.symmetryAxis > 0) {
         if (options.json) {
@@ -1920,6 +2024,50 @@ int main(int argc, char** argv)
         const AutoRemesher::TopologyStats& inputStats = remesher.inputStats();
         const Advisory advice = buildAdvisory(vertices, triangles, inputStats);
         const bool volumeClosed = 0 == inputStats.boundaryEdges;
+        // Symmetry, measured here rather than discovered after a full remesh.  A
+        // mirror on a mesh with no mirror partner cuts real geometry, so the number
+        // that decides it has to arrive before the run that would act on it - and
+        // reading it off the finished mesh costs the 14 s this mode exists to avoid.
+        // All three axes are measured unless the caller named one, because "which
+        // axis is the symmetric one" is the other half of the question.
+        const double symmetryTolerance = options.symmetryTolerance
+            * (extent.diagonal > 0.0 ? extent.diagonal : 1.0);
+        struct AxisSymmetry {
+            int axis = 0;
+            AutoRemesher::SymmetryCheck check;
+        };
+        std::vector<AxisSymmetry> axisSymmetries;
+        {
+            const int firstAxis = options.symmetryAxis > 0 ? options.symmetryAxis : 1;
+            const int lastAxis = options.symmetryAxis > 0 ? options.symmetryAxis : 3;
+            for (int axis = firstAxis; axis <= lastAxis; ++axis) {
+                AxisSymmetry entry;
+                entry.axis = axis;
+                // An explicitly named plane is measured against that plane; otherwise
+                // the median of the coordinates is the estimate, which is what the
+                // full run would use for the same mesh.
+                entry.check = AutoRemesher::evaluateSymmetry(vertices, triangles, axis,
+                    options.symmetryPlane, !options.symmetryPlaneSet, symmetryTolerance);
+                axisSymmetries.push_back(entry);
+            }
+        }
+        const AxisSymmetry* bestSymmetry = nullptr;
+        for (const auto& entry : axisSymmetries) {
+            if (entry.check.consideredVertices > 0
+                && (nullptr == bestSymmetry
+                    || entry.check.matchPct > bestSymmetry->check.matchPct))
+                bestSymmetry = &entry;
+        }
+        // What the measurement licenses: mirror-half only pays off on a mesh that is
+        // nearly symmetric, snap is the repair for a seam that is close, and below
+        // half the vertices matching, every mode is a way to lose geometry.
+        const char* symmetryVerdict = "off";
+        if (nullptr != bestSymmetry) {
+            if (bestSymmetry->check.matchPct >= 80.0)
+                symmetryVerdict = "mirror-half";
+            else if (bestSymmetry->check.matchPct >= 50.0)
+                symmetryVerdict = "snap";
+        }
         if (options.json) {
             std::ostringstream payload;
             payload.setf(std::ios::fixed);
@@ -1947,6 +2095,23 @@ int main(int argc, char** argv)
                     << ",\"sharp_edge_share\":" << std::setprecision(4) << advice.sharpEdgeShare
                     << ",\"longest_boundary_loop\":" << advice.longestBoundaryLoop
                     << ",\"reason\":\"" << jsonEscape(advice.reason) << "\"}"
+                    << ",\"symmetry\":{\"tolerance\":" << std::setprecision(9) << symmetryTolerance
+                    << ",\"auto_axis\":" << (options.symmetryAxis > 0 ? "false" : "true")
+                    << ",\"verdict\":\"" << symmetryVerdict << "\""
+                    << ",\"axes\":[";
+            for (size_t i = 0; i < axisSymmetries.size(); ++i) {
+                const AutoRemesher::SymmetryCheck& check = axisSymmetries[i].check;
+                if (i > 0)
+                    payload << ",";
+                payload << "{\"axis\":\"" << symmetryAxisName(axisSymmetries[i].axis) << "\""
+                        << ",\"plane\":" << std::setprecision(6) << check.plane
+                        << ",\"match_pct\":" << std::setprecision(3) << check.matchPct
+                        << ",\"matched\":" << check.matchedVertices
+                        << ",\"considered\":" << check.consideredVertices
+                        << ",\"max_deviation\":" << std::setprecision(9) << check.maxDeviation
+                        << ",\"mean_deviation\":" << check.meanDeviation << "}";
+            }
+            payload << "]}"
                     << ",\"effective_params\":" << effectiveParamsJson(options)
                     << "}";
             emitLine(payload.str());
@@ -1964,6 +2129,19 @@ int main(int argc, char** argv)
             printf("  advice: preset %s%s%s; %s\n", advice.preset.c_str(),
                 advice.weldPatches ? ", weld-patches" : "", advice.projectedCaps ? ", projected-caps" : "",
                 advice.reason.c_str());
+            if (nullptr != bestSymmetry) {
+                // The tolerance is printed as the fraction it is: it is the one
+                // number a caller reuses across models, and a raw distance would
+                // change meaning with the model's unit.
+                printf("  symmetry: best axis %s, %.1f%% of the vertices have a mirror partner "
+                       "within %.3g of the bbox diagonal -> %s\n",
+                    symmetryAxisName(bestSymmetry->axis), bestSymmetry->check.matchPct,
+                    options.symmetryTolerance,
+                    strcmp(symmetryVerdict, "off") == 0 ? "leave it off"
+                                                        : (strcmp(symmetryVerdict, "snap") == 0
+                                                                  ? "snap the seam only"
+                                                                  : "mirror-half is safe"));
+            }
         }
         return 0;
     }
@@ -2055,7 +2233,18 @@ int main(int argc, char** argv)
         // and per-vertex channels the same way a baker resolves them.
         uvStats = AutoRemesher::collectUvStats(writtenVertices, writtenFaces, writtenFaceUvs,
             std::vector<int>());
-        uvStats.chartCount = remesher.uvChartCount();
+        // Chart count of the layout that was actually written.  The packer grouped
+        // the written corners chart by chart, so its count is the one a baker sees;
+        // uvChartCount() is only filled by the seam-splitting path, and reporting it
+        // first made chart_count 0 for every other mode - a zero sitting next to
+        // packed_charts 2555 in the same block.
+        const AutoRemesher::UvPackResult& pack = remesher.uvPackResult();
+        if (pack.chartCount > 0)
+            uvStats.chartCount = pack.chartCount;
+        else if (pack.packedCharts > 0)
+            uvStats.chartCount = pack.packedCharts;
+        else
+            uvStats.chartCount = remesher.uvChartCount();
         haveUvStats = true;
     }
 
@@ -2069,6 +2258,22 @@ int main(int argc, char** argv)
     }
 
     reportTargetHealth(options, options.targetQuads, quads, remesher.holeStats());
+    // A closed input that comes back with boundary edges is the one failure the
+    // consumer cannot work around: measured at a 6k budget the residual is a
+    // pinched boundary loop - a figure eight through one duplicated vertex - which
+    // the loop walk skips and which no cap can close without adding a face onto an
+    // edge that already has two.  Naming it is the difference between "the tool
+    // left a hole" and "this is what is left and why".
+    if (0 == remesher.inputStats().boundaryEdges && remesher.outputStats().boundaryEdges > 0) {
+        std::ostringstream message;
+        message << remesher.outputStats().boundaryEdges
+                << " boundary edge(s) in " << remesher.outputStats().boundaryLoops
+                << " loop(s) survived on a closed input: a loop that walks through one vertex "
+                << "twice cannot be capped without giving an edge a third face, so it is "
+                << "reported rather than sealed";
+        emitWarning(options, "closed_input_left_open", message.str(),
+            (long long)remesher.outputStats().boundaryEdges);
+    }
 
     // Symmetry advice, never a veto: on a single-view reconstruction the honest
     // answer is usually "this mesh is not symmetric", and the caller decides
@@ -2137,12 +2342,18 @@ int main(int argc, char** argv)
                 << ",\"same\":" << ((haveExported && topologiesAgree(outputStats, exportedStats)) ? "true" : "false")
                 << "}"
                 << ",\"quality\":" << qualityJson(quality)
+                << ",\"aspect_clamp\":{\"threshold\":" << std::setprecision(3) << remesher.aspectStats().threshold
+                << ",\"collapses\":" << remesher.aspectStats().collapses
+                << ",\"faces\":" << remesher.aspectStats().faces
+                << ",\"rejected\":" << remesher.aspectStats().rejected
+                << ",\"too_long_remaining\":" << remesher.aspectStats().tooLongRemaining << "}"
                 << ",\"budget\":" << budgetJson(options, quads, quadsError, outputStats)
                 << ",\"unit_guess\":\"" << reportUnit.name << "\""
                 << ",\"unit_scale_to_mm\":" << reportUnit.scaleToMm
                 << ",\"holes\":{\"filled\":" << holes.filled
                 << ",\"ignored\":" << holes.ignored
-                << ",\"facesAdded\":" << holes.facesAdded << "}"
+                << ",\"facesAdded\":" << holes.facesAdded
+                << ",\"sealed_closed_input\":" << holes.sealedClosedInput << "}"
                 << ",\"patches\":{\"kept\":" << patches.kept
                 << ",\"dropped\":" << patches.dropped
                 << ",\"welded_vertices\":" << patches.weldedVertices
@@ -2198,6 +2409,12 @@ int main(int argc, char** argv)
                 symmetryAxisName(options.symmetryAxis), symmetry.plane, symmetry.seamVertices,
                 symmetry.clippedFaces, symmetry.mirroredFaces,
                 symmetry.verticesBefore, symmetry.verticesAfter);
+        }
+        if (remesher.aspectStats().threshold > 0.0 && remesher.aspectStats().tooLongRemaining > 0) {
+            printf("  aspect: %zu quad(s) still over %g (topology refuses the collapse); "
+                   "%zu collapsed, %zu rejected\n",
+                remesher.aspectStats().tooLongRemaining, remesher.aspectStats().threshold,
+                remesher.aspectStats().collapses, remesher.aspectStats().rejected);
         }
         if (holes.filled > 0 || holes.ignored > 0 || patches.dropped > 0) {
             printf("  holes: %zu filled, %zu left open (+%zu faces); patches: %zu kept, %zu dropped\n",

@@ -52,6 +52,23 @@ struct HoleStats {
     size_t filled = 0;
     size_t ignored = 0;
     size_t facesAdded = 0;
+    // Loops sealed only because the input was closed, i.e. the ones the length
+    // thresholds would have left open.  Split out so "the thresholds ignored 5
+    // holes" and "5 holes were sealed anyway" cannot be confused.
+    size_t sealedClosedInput = 0;
+};
+
+// What the aspect clamp did, summed over the islands.  A face over the threshold
+// the caller asked for is a promise the run either kept or could not keep, and the
+// counters are what separates "the clamp did nothing" from "the clamp tried and the
+// topology refused": rejected counts the faces it had to leave alone because
+// collapsing their short side would have given some edge a third face.
+struct AspectStats {
+    double threshold = 0.0;
+    size_t collapses = 0;
+    size_t faces = 0;
+    size_t rejected = 0;
+    size_t tooLongRemaining = 0;
 };
 
 struct PatchStats {
@@ -167,6 +184,15 @@ public:
         m_projectedHoleCaps = projected;
     }
 
+    // Seal every hole when the input had no boundary at all: the loops are then
+    // extraction artifacts, and a low quad budget used to return them to the
+    // caller as 658 boundary edges and two shells.  On (the default) for a closed
+    // input, no effect on an open one.
+    void setSealClosedInputHoles(bool seal)
+    {
+        m_sealClosedInputHoles = seal;
+    }
+
     void setLocalRemesh(bool enabled)
     {
         m_localRemesh = enabled;
@@ -178,6 +204,15 @@ public:
     void setMaximumAspect(double maximumAspect)
     {
         m_maximumAspect = maximumAspect;
+    }
+
+    // The end-of-extraction cleanup: weld zero length edges, drop degenerate and
+    // duplicate faces, remove the faces around a non-manifold edge.  It was on the
+    // extractor with no way to reach it from here, so --no-clean-degenerate was a
+    // no-op flag that only echoed itself in effective_params.
+    void setCleanDegenerate(bool enabled)
+    {
+        m_cleanDegenerate = enabled;
     }
 
     // 0 keeps the budget loop's own policy.  1 is the speed switch: one cover
@@ -243,6 +278,18 @@ public:
     void setUvPacking(bool enabled)
     {
         m_uvPacking = enabled;
+    }
+
+    // How many faces one packed UV item may hold.  0 keeps the natural chart
+    // grouping (the historical layout); 1 packs every face on its own.  The
+    // per-face UVs a cover writes agree only up to its own extrapolation error, so
+    // one big chart hides that error inside a box the packer can no longer split -
+    // measured 14.7% of the covered cells overlapping at a 40k budget, all of it
+    // inside charts.  Packing per face removes the intra-chart term entirely, at
+    // the cost of a seam on every edge.
+    void setUvPackItemFaces(size_t faces)
+    {
+        m_uvPackItemFaces = faces;
     }
 
     const UvPackResult& uvPackResult() const
@@ -375,6 +422,11 @@ public:
     const HoleStats& holeStats() const
     {
         return m_holeStats;
+    }
+
+    const AspectStats& aspectStats() const
+    {
+        return m_aspectStats;
     }
 
     const PatchStats& patchStats() const
@@ -534,6 +586,7 @@ private:
     bool m_exportUvs = true;
     bool m_uvSeamSplitting = false;
     bool m_uvPacking = true;
+    size_t m_uvPackItemFaces = 0;
     UvPackResult m_uvPackResult;
     int m_symmetryAxis = 0;
     double m_symmetryPlane = 0.0;
@@ -553,7 +606,9 @@ private:
     bool m_weldPatches = false;
     bool m_gradedHoleFilling = true;
     bool m_projectedHoleCaps = false;
+    bool m_sealClosedInputHoles = true;
     bool m_localRemesh = false;
+    bool m_cleanDegenerate = true;
     double m_maximumAspect = 0.0;
     int m_coverAttempts = 0;
     int m_curlMode = 0;
@@ -562,6 +617,7 @@ private:
     bool m_inputAnalyzed = false;
     double m_inputAnalysisMilliseconds = 0.0;
     HoleStats m_holeStats;
+    AspectStats m_aspectStats;
     PatchStats m_patchStats;
     std::vector<PhaseTiming> m_phaseTimings;
     size_t m_islandCount = 0;

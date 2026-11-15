@@ -155,10 +155,19 @@ struct UvPackResult {
     bool ok = false;
 };
 
+// maxChartFaces caps how many faces one packed item may hold.  0 keeps the
+// natural chart grouping; 1 packs every face on its own, which is the only layout
+// whose intra-chart error is zero by construction - the per-face UVs a cover writes
+// agree only up to its own extrapolation error, and inside a big chart that error
+// shows up as faces fighting over the same texels (measured 14.7% of the covered
+// cells at a 40k budget, none of it between charts).  A negative margin means
+// "relative": the gap becomes 5% of the average item size instead of the absolute
+// value, because an absolute gap that suits one chart size collapses the layout
+// when there are thousands of small items.
 UvPackResult packUvCharts(const std::vector<std::vector<size_t>>& faces,
     std::vector<std::vector<Vector2>>* faceUvs,
     std::vector<Vector2>* vertexUvs,
-    double margin);
+    double margin, size_t maxChartFaces = 0);
 
 UvStats collectUvStats(const std::vector<Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,

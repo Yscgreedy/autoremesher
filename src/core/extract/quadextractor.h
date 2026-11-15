@@ -76,6 +76,10 @@ public:
     struct ExtractionStats {
         size_t holesFilled = 0; // holes (loops) actually filled on the final mesh
         size_t holesIgnored = 0; // holes skipped (too long / no projected caps)
+        // Loops sealed because the input was closed (setSealClosedInputHoles):
+        // counted per pass over the whole extraction like holeFacesAdded, since a
+        // loop a first pass sealed is gone by the second one anyway.
+        size_t holesSealedClosedInput = 0;
         size_t holeFacesAdded = 0; // faces created by hole filling
         size_t patchesKept = 0; // extracted patches kept for this island
         size_t patchesDropped = 0; // patches thrown away
@@ -171,6 +175,19 @@ public:
     void setProjectedHoleCaps(bool projected)
     {
         m_projectedHoleCaps = projected;
+    }
+
+    // Seal every boundary loop, whatever its perimeter, because the input this
+    // mesh came from had no boundary at all: a hole here is what the extraction
+    // failed to cover, not the shape.  Without it the 8/65 edge thresholds apply
+    // and a low quad budget - where the cover leaves a few hundred edges open -
+    // hands the caller a mesh with 658 boundary edges and two shells.
+    // Large loops are capped with the projected two-ring cap in this mode, since
+    // the source surface is known to exist underneath them.
+    // Off by default: an open input keeps the historical thresholds.
+    void setSealClosedInputHoles(bool seal)
+    {
+        m_sealClosedInputHoles = seal;
     }
 
     // Hole filling decides by edge count, and an edge count only describes a
@@ -270,6 +287,7 @@ private:
     bool m_weldPatches = false;
     bool m_gradedHoleFilling = false;
     bool m_projectedHoleCaps = false;
+    bool m_sealClosedInputHoles = false;
     bool m_localRemesh = false;
     bool m_cleanDegenerate = true;
     double m_maximumAspect = 0.0;
@@ -283,11 +301,21 @@ private:
     // the faces it can and returns how many it added.  largeHoleEdges is the large
     // hole threshold already converted to output edges, so the cap strategy and the
     // decision to cap at all cannot drift apart.
-    size_t fillHoleGraded(const std::vector<size_t>& hole, double largeHoleEdges);
+    // allowProjectedRing forces the two-ring projected cap even when the caller did
+    // not ask for --projected-caps (setSealClosedInputHoles does that): on a closed
+    // input the loop is an artifact and the source surface is known to be there.
+    size_t fillHoleGraded(const std::vector<size_t>& hole, double largeHoleEdges,
+        bool allowProjectedRing = false);
     // Ratio between the edge length the remesher aimed at and the one the output
     // actually came out with; 1.0 whenever the caller did not state a target, which
     // is what keeps the default hole thresholds counting raw edges.
     double holeEdgeScale() const;
+    // Merges vertices that sit on the same point, whether or not they share a face.
+    // The validate pass welds along face edges only, so a duplicated cross point
+    // that is not adjacent to its original survives it - and shows up as a boundary
+    // loop walking through the same vertex twice, which no cap can close.
+    // Returns the number of vertices merged away; 0 when nothing was close enough.
+    size_t weldCoincidentVertices();
     double remeshedMeanEdgeLength() const;
     // Snaps a point onto the source mesh (the input surface, which is complete
     // even where the output has a hole) so cap vertices follow the real surface.

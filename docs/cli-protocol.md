@@ -182,4 +182,31 @@ Conventions worth knowing:
 - Warning codes added: `output_reload_failed`, `symmetry_mismatch`,
   `symmetry_clip_heavy`.
 
+### `result` / flags added in 1.4 (all additive)
 
+| flag | default | meaning |
+|---|---|---|
+| `--uv-pack-items chart\|face` | chart | how the UV layout is packed. `chart` keeps the cover's charts whole (a seam only where the cover changes chart, but intra-chart extrapolation error shows up as overlap: 4.9-14.7% of the covered cells). `face` gives every face its own box: overlap 0.10-0.68% and `bakeable: true`, at the price of a seam on every edge and a lower `area` ceiling. |
+| `--no-seal-closed-holes` | off (sealing is on) | keep the historical 8/65 edge hole thresholds even when the input had no boundary at all. On a closed input every loop is an extraction artifact, so by default they are all capped; this switch restores the old behaviour for an A/B run. |
+| `--max-aspect F` | 20 | **best effort**, and now documented as such: quads only (triangles and n-gons are untouched), one pass at the end of extraction, and a quad whose short side cannot be collapsed without giving some edge a third face is left as it is. |
+
+New `result` fields:
+
+```json
+"aspect_clamp":{"threshold":20.0,"collapses":34,"faces":34,"rejected":0,"too_long_remaining":0},
+"budget":{"requested":6000,"actual":5188,"error":-0.1353,"withinTolerance":false,
+          "faces":5613,"face_error":-0.0645,"faces_within_tolerance":false,
+          "mode":"solved","non_quads":425,
+          "suggestion":"the face count is within tolerance; the gap is the non-quad faces ..."},
+"holes":{"filled":213,"ignored":0,"facesAdded":1723,"sealed_closed_input":95},
+"uvStats":{"mode":"corner","area":0.205,"overlap_pct":0.579,"chart_count":5950,
+           "max_stretch":95.6,"median_stretch":1.03,"stray_triangles":0,"bakeable":true,
+           "packed":true,"packed_charts":5950,"pack_fill":0.41}
+```
+
+- **`budget.faces` / `face_error` / `faces_within_tolerance`**: a target of 20000 is a **face** budget, and a run can hit it while the quad count is 6-13% below, because the cleanup passes leave triangles and pentagons. `actual` / `error` / `withinTolerance` keep their v1 quad meaning; the face fields sit beside them and `suggestion` says which of the two missed.
+- **`aspect_clamp`**: `rejected` counts faces the clamp had to leave alone, `too_long_remaining` counts quads still over the threshold when it gave up. `threshold: 0` means the clamp never ran (`--max-aspect 0` or `--no-clean-degenerate`).
+- **`holes.sealed_closed_input`**: loops sealed only because the input was closed. They are also counted in `filled`; this field separates "the thresholds capped it" from "the closed-input rule capped it anyway".
+- **`uvStats.chart_count`** is now the number of packed items (equal to `packed_charts`), i.e. what a baker sees. It used to come from `AutoRemesher::uvChartCount()`, which only the seam-splitting path fills, so every other mode reported 0 next to a non-zero `packed_charts`.
+- **`--check-only`** now also reports symmetry: `symmetry.axes[]` with `match_pct` per axis (all three unless `--symmetry AXIS` names one), plus `verdict`: `mirror-half` at >=80% matched, `snap` at >=50%, `off` below. Measured cost: +46 ms on a 59,750-vertex mesh.
+- Warning codes added: `closed_input_left_open` (a closed input still has boundary edges after sealing - a pinched loop that cannot be capped); `holes_left_open` now also mentions the closed-input rule.

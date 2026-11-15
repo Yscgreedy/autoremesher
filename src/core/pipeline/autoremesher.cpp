@@ -34,6 +34,7 @@
 #include <iostream>
 #include <limits>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -1167,6 +1168,10 @@ bool AutoRemesher::remesh()
         }
     }
 
+    // Symmetry is applied last, on the merged mesh: the input snap and the mirror
+    // pairing have to see the whole model, not one island at a time.
+    symmetrizeOutput();
+
     // Hole filling and patch selection used to be silent decisions made deep in
     // the extractor.  Sum what each island actually did so the caller can say
     // "3 holes filled, 1 left open, 2 patches dropped" instead of leaving the
@@ -1330,6 +1335,271 @@ bool AutoRemesher::remesh()
         m_progressHandler(m_tag, 1.0, "Done");
 
     return true;
+}
+
+
+void AutoRemesher::symmetrizeOutput()
+{
+    m_symmetryStats = SymmetryStats();
+    if (m_symmetryAxis < 1 || m_symmetryAxis > 3 || m_remeshedVertices.empty())
+        return;
+    const size_t axis = (size_t)(m_symmetryAxis - 1);
+    m_symmetryStats.axis = m_symmetryAxis;
+    m_symmetryStats.verticesBefore = m_remeshedVertices.size();
+
+    // The quad mesh is cut at the plane and the positive half is mirrored onto the
+    // negative one, so the result is symmetric by construction instead of by
+    // hope: pairing vertices after the fact only works when the topology already
+    // happens to mirror.  The cut row is the price: a few faces lose a corner.
+    Vector3 minimum = m_remeshedVertices[0];
+    Vector3 maximum = m_remeshedVertices[0];
+    for (const auto& vertex : m_remeshedVertices) {
+        for (size_t i = 0; i < 3; ++i) {
+            minimum[i] = std::min(minimum[i], vertex[i]);
+            maximum[i] = std::max(maximum[i], vertex[i]);
+        }
+    }
+    const double diagonal = (maximum - minimum).length();
+    const double seamTolerance = std::max(1e-12, m_symmetryTolerance * (diagonal > 0.0 ? diagonal : 1.0));
+    m_symmetryStats.tolerance = seamTolerance;
+
+    const bool keepUvs = m_remeshedFaceUvs.size() == m_remeshedQuads.size();
+    std::vector<Vector3> vertices;
+    std::vector<std::vector<size_t>> faces;
+    std::vector<std::vector<Vector2>> faceUvs;
+    std::vector<size_t> originalToKept(m_remeshedVertices.size(), (size_t)-1);
+    const size_t noIndex = (size_t)-1;
+
+    const auto keepVertex = [&](size_t index) {
+        if (originalToKept[index] != noIndex)
+            return originalToKept[index];
+        const size_t kept = vertices.size();
+        vertices.push_back(m_remeshedVertices[index]);
+        originalToKept[index] = kept;
+        return kept;
+    };
+    const auto snapToSeam = [&](Vector3 point) {
+        if (std::fabs(point[axis]) <= seamTolerance)
+            point[axis] = 0.0;
+        return point;
+    };
+
+    for (size_t faceIndex = 0; faceIndex < m_remeshedQuads.size(); ++faceIndex) {
+        const std::vector<size_t>& face = m_remeshedQuads[faceIndex];
+        if (face.size() < 3)
+            continue;
+        // Classify by the exact sign: a face whose vertices sit inside the seam
+        // band still has a side, and dropping it would tear a hole next to the
+        // plane instead of cutting it.
+        bool anyPositive = false;
+        bool anyNegative = false;
+        for (const size_t corner : face) {
+            const double coordinate = m_remeshedVertices[corner][axis];
+            if (coordinate > 0.0)
+                anyPositive = true;
+            else if (coordinate < 0.0)
+                anyNegative = true;
+        }
+        if (!anyNegative) {
+            std::vector<size_t> keptFace;
+            keptFace.reserve(face.size());
+            for (const size_t corner : face)
+                keptFace.push_back(keepVertex(corner));
+            faces.push_back(std::move(keptFace));
+            if (keepUvs)
+                faceUvs.push_back(m_remeshedFaceUvs[faceIndex]);
+            continue;
+        }
+        if (!anyPositive)
+            continue;
+        // Sutherland-Hodgman against coordinate >= 0, carrying the face's own UV
+        // so a corner created by the cut still samples the chart of that face.
+        const std::vector<Vector2> sourceUvs = keepUvs ? m_remeshedFaceUvs[faceIndex] : std::vector<Vector2>();
+        std::vector<Vector3> clipped;
+        std::vector<Vector2> clippedUvs;
+        // Which original vertex each clipped corner came from, or noIndex for a
+        // point the cut created.  Reusing the original index is what keeps the
+        // clipped face stitched to its neighbours: a fresh copy of an unmoved
+        // corner would crack the mesh along every cut face.
+        std::vector<size_t> clippedSource;
+        const size_t count = face.size();
+        for (size_t i = 0; i < count; ++i) {
+            const size_t j = (i + 1) % count;
+            const double di = m_remeshedVertices[face[i]][axis];
+            const double dj = m_remeshedVertices[face[j]][axis];
+            if (di >= 0.0) {
+                clipped.push_back(m_remeshedVertices[face[i]]);
+                clippedSource.push_back(face[i]);
+                if (keepUvs)
+                    clippedUvs.push_back(sourceUvs[i]);
+            }
+            if ((di > 0.0 && dj < 0.0) || (di < 0.0 && dj > 0.0)) {
+                const double ratio = di / (di - dj);
+                const Vector3 point = m_remeshedVertices[face[i]] * (1.0 - ratio)
+                    + m_remeshedVertices[face[j]] * ratio;
+                clipped.push_back(snapToSeam(point));
+                clippedSource.push_back(noIndex);
+                if (keepUvs)
+                    clippedUvs.push_back(sourceUvs[i] * (1.0 - ratio) + sourceUvs[j] * ratio);
+            }
+        }
+        if (clipped.size() < 3)
+            continue;
+        ++m_symmetryStats.clippedFaces;
+        std::vector<size_t> keptFace;
+        keptFace.reserve(clipped.size());
+        for (size_t i = 0; i < clipped.size(); ++i) {
+            if (clippedSource[i] != noIndex) {
+                keptFace.push_back(keepVertex(clippedSource[i]));
+                continue;
+            }
+            keptFace.push_back(vertices.size());
+            vertices.push_back(clipped[i]);
+        }
+        faces.push_back(std::move(keptFace));
+        if (keepUvs)
+            faceUvs.push_back(std::move(clippedUvs));
+    }
+
+    // Everything on the plane snaps exactly onto it.
+    std::vector<char> onPlane(vertices.size(), 0);
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        if (std::fabs(vertices[i][axis]) <= seamTolerance) {
+            vertices[i][axis] = 0.0;
+            onPlane[i] = 1;
+        }
+    }
+
+    // Weld the seam.  Each face invented its own corner where the plane cut it, so
+    // the same point exists once per face; without welding those corners the
+    // mirror would leave the cut open.
+    {
+        std::vector<size_t> weld(vertices.size());
+        for (size_t i = 0; i < vertices.size(); ++i)
+            weld[i] = i;
+        std::map<std::pair<long long, long long>, size_t> seamMap;
+        const double cell = std::max(seamTolerance, 1e-12);
+        for (size_t i = 0; i < vertices.size(); ++i) {
+            if (!onPlane[i])
+                continue;
+            long long first = 0;
+            long long second = 0;
+            bool firstSeen = false;
+            for (size_t k = 0; k < 3; ++k) {
+                if (k == axis)
+                    continue;
+                const long long value = (long long)std::llround(vertices[i][k] / cell);
+                if (!firstSeen) {
+                    first = value;
+                    firstSeen = true;
+                } else {
+                    second = value;
+                }
+            }
+            const std::pair<long long, long long> key(first, second);
+            const auto found = seamMap.find(key);
+            if (found == seamMap.end())
+                seamMap[key] = i;
+            else
+                weld[i] = found->second;
+        }
+        for (auto& face : faces) {
+            std::vector<size_t> remapped;
+            remapped.reserve(face.size());
+            for (const size_t corner : face) {
+                const size_t target = weld[corner];
+                if (!remapped.empty() && remapped.back() == target)
+                    continue;
+                remapped.push_back(target);
+            }
+            if (remapped.size() > 1 && remapped.front() == remapped.back())
+                remapped.pop_back();
+            face = remapped;
+        }
+        // Drop the faces the weld collapsed and compact what is still referenced.
+        std::vector<std::vector<size_t>> keptFaces;
+        keptFaces.reserve(faces.size());
+        std::vector<std::vector<Vector2>> keptFaceUvs;
+        for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+            if (faces[faceIndex].size() < 3)
+                continue;
+            keptFaces.push_back(std::move(faces[faceIndex]));
+            if (keepUvs)
+                keptFaceUvs.push_back(std::move(faceUvs[faceIndex]));
+        }
+        faces = std::move(keptFaces);
+        faceUvs = std::move(keptFaceUvs);
+
+        std::vector<size_t> compact(vertices.size(), noIndex);
+        std::vector<Vector3> compacted;
+        compacted.reserve(vertices.size());
+        for (auto& face : faces) {
+            for (auto& corner : face) {
+                if (compact[corner] == noIndex) {
+                    compact[corner] = compacted.size();
+                    compacted.push_back(vertices[corner]);
+                }
+                corner = compact[corner];
+            }
+        }
+        vertices.swap(compacted);
+    }
+
+    onPlane.assign(vertices.size(), 0);
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        if (vertices[i][axis] == 0.0)
+            onPlane[i] = 1;
+    }
+
+    const size_t keptCount = vertices.size();
+    std::vector<size_t> mirrorIndex(keptCount, noIndex);
+    for (size_t i = 0; i < keptCount; ++i) {
+        if (onPlane[i]) {
+            mirrorIndex[i] = i;
+            continue;
+        }
+        Vector3 mirrored = vertices[i];
+        mirrored[axis] = -mirrored[axis];
+        mirrorIndex[i] = vertices.size();
+        vertices.push_back(mirrored);
+    }
+
+    const size_t keptFaceCount = faces.size();
+    for (size_t faceIndex = 0; faceIndex < keptFaceCount; ++faceIndex) {
+        const std::vector<size_t> face = faces[faceIndex];
+        bool hasPositive = false;
+        for (const size_t corner : face) {
+            if (vertices[corner][axis] > 0.0) {
+                hasPositive = true;
+                break;
+            }
+        }
+        if (!hasPositive)
+            continue;
+        std::vector<size_t> mirroredFace;
+        mirroredFace.reserve(face.size());
+        for (auto it = face.rbegin(); it != face.rend(); ++it)
+            mirroredFace.push_back(mirrorIndex[*it]);
+        faces.push_back(std::move(mirroredFace));
+        if (keepUvs) {
+            std::vector<Vector2> mirroredUvs(faceUvs[faceIndex].rbegin(), faceUvs[faceIndex].rend());
+            faceUvs.push_back(std::move(mirroredUvs));
+        }
+        ++m_symmetryStats.mirroredFaces;
+    }
+
+    m_remeshedVertices = std::move(vertices);
+    m_remeshedQuads = std::move(faces);
+    if (keepUvs)
+        m_remeshedFaceUvs = std::move(faceUvs);
+    else
+        m_remeshedFaceUvs.clear();
+
+    for (size_t i = 0; i < m_remeshedVertices.size(); ++i) {
+        if (m_remeshedVertices[i][axis] == 0.0)
+            ++m_symmetryStats.seamVertices;
+    }
+    m_symmetryStats.verticesAfter = m_remeshedVertices.size();
 }
 
 void AutoRemesher::analyzeInput()

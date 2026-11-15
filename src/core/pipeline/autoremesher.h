@@ -319,6 +319,35 @@ public:
         return m_lastError;
     }
 
+    // Mirror symmetry across a coordinate plane: 0 = off, 1 = x = 0, 2 = y = 0,
+    // 3 = z = 0.  The output is made exactly symmetric where both sides agree on
+    // a counterpart; vertices without one are counted, which is the honest
+    // measure of how much the topology itself is asymmetric.
+    void setSymmetryAxis(int axis)
+    {
+        m_symmetryAxis = axis;
+    }
+
+    void setSymmetryTolerance(double fraction)
+    {
+        m_symmetryTolerance = fraction;
+    }
+
+    struct SymmetryStats {
+        int axis = 0;
+        size_t seamVertices = 0;
+        size_t clippedFaces = 0;   // faces the plane cut in two
+        size_t mirroredFaces = 0;  // faces added by the mirror
+        size_t verticesBefore = 0;
+        size_t verticesAfter = 0;
+        double tolerance = 0.0;    // how close to the plane counts as "on the seam"
+    };
+
+    const SymmetryStats& symmetryStats() const
+    {
+        return m_symmetryStats;
+    }
+
     // The phase report used to go straight to stderr from inside the library.
     // The application owns that decision now: a silent run turns it off, and a
     // caller that wants the report reads phaseReport()/phaseTimings() instead.
@@ -382,6 +411,13 @@ private:
     double m_smoothNormalDegrees = 0.0;
     bool m_exactTargetQuads = false;
     bool m_exportUvs = true;
+    int m_symmetryAxis = 0;
+    double m_symmetryTolerance = 0.002;
+    SymmetryStats m_symmetryStats;
+
+    // Pulls near-mirror vertex pairs onto each other's mirror image and snaps the
+    // seam to the plane; called once after the islands are merged.
+    void symmetrizeOutput();
     bool m_relativePositionTolerance = true;
     double m_islandAreaFraction = 0.0;
     bool m_weldPatches = false;

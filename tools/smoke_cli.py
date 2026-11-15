@@ -197,6 +197,21 @@ def main():
         check("input_open_boundary" in codes,
               "open shell did not warn about its boundary (codes: %r)" % codes, failures)
 
+        # Symmetry cuts and mirrors: the result has to say what it cut and welded.
+        proc = run(binary, ["--input", model, "--output", os.path.join(workspace, "sym.obj"),
+                            "--target-quads", "800", "--symmetry", "x", "--json", "--quiet"])
+        check(proc.returncode == 0, "symmetry run exit code %d" % proc.returncode, failures)
+        sym_events = parse_events(proc.stdout)
+        sym_result = sym_events[-1] if sym_events else {}
+        symmetry = sym_result.get("symmetry", {})
+        check(symmetry.get("axis") == "x", "symmetry axis missing: %r" % symmetry, failures)
+        check(symmetry.get("seamVertices", 0) > 0, "symmetry welded no seam: %r" % symmetry, failures)
+        check(symmetry.get("mirroredFaces", 0) > 0, "symmetry mirrored no faces: %r" % symmetry, failures)
+        mirror = count_obj(os.path.join(workspace, "sym.obj"))
+        check(mirror["v"] == symmetry.get("verticesAfter"),
+              "symmetry vertex count %d vs reported %r" % (mirror["v"], symmetry.get("verticesAfter")),
+              failures)
+
     if failures:
         print("smoke: FAIL")
         for failure in failures:

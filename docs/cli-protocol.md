@@ -16,6 +16,8 @@ autoremesher --input MODEL.obj --output OUT.obj --target-quads 20000 [options]
 | `-o, --output PATH` | `<input-stem>_remeshed.obj` | output OBJ: quad faces with `vt` per corner and `vn` per vertex |
 | `--no-uv` | off | skip the `vt` lines |
 | `--no-normals` | off | skip the `vn` lines |
+| `--symmetry x\|y\|z` | off | cut at that plane, weld the seam, mirror the positive half |
+| `--symmetry-tolerance F` | 0.002 | seam tolerance as a fraction of the bbox diagonal |
 | `-q, --target-quads N` | 20000 | requested quad count (the core receives 2*N triangles). The cover scale is solved from this budget, so the result lands within about **±5%**; `--legacy-target-quads` restores the old average-edge-length path, which lands around **0.7N..1.05N** |
 | `--adaptivity F` | 0.5 | gradient adaptivity 0..1 |
 | `--anisotropy F` | 0.0 | anisotropy 0..1 |
@@ -57,6 +59,7 @@ One JSON object per line, flushed as it happens. The GUI reads stdout line by li
  "topology":{"input":{"...":"same fields as the input event"},"output":{"boundaryEdges":0,"boundaryLoops":0,"nonManifoldEdges":0,"components":7,"degenerateFaces":0}},
  "holes":{"filled":3,"ignored":1,"facesAdded":42},"patches":{"kept":7,"dropped":2},
  "uvs":true,"uvCorners":79840,"normals":true,
+ "symmetry":{"axis":"x","seamVertices":174,"clippedFaces":176,"mirroredFaces":3227,"verticesBefore":6278,"verticesAfter":6452,"tolerance":0.0069},
  "phases":[{"name":"Analyze input topology","ms":12.1,"accumulated":false},{"name":"Solve frame field","ms":267.8,"accumulated":true}]}
 {"type":"error","message":"failed to load input.obj"}
 ```

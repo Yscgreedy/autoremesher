@@ -10,22 +10,34 @@ import (
 // Event is one normalised line of the CLI JSON-lines protocol plus the small
 // number of synthetic events the GUI adds (stderr log lines, "end").
 type Event struct {
-	Type        string   `json:"type"`
-	Value       float64  `json:"value,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Level       string   `json:"level,omitempty"`
-	Message     string   `json:"message,omitempty"`
-	Lines       []string `json:"lines,omitempty"`
-	Output      string   `json:"output,omitempty"`
-	Seconds     float64  `json:"seconds,omitempty"`
-	Vertices    int      `json:"vertices,omitempty"`
-	Quads       int      `json:"quads,omitempty"`
-	NonQuads    int      `json:"nonQuads,omitempty"`
-	Triangles   int      `json:"triangles,omitempty"`
-	Version     string   `json:"version,omitempty"`
-	Input       string   `json:"input,omitempty"`
-	TargetQuads int      `json:"targetQuads,omitempty"`
-	At          string   `json:"at,omitempty"`
+	Type        string     `json:"type"`
+	Value       float64    `json:"value,omitempty"`
+	Status      string     `json:"status,omitempty"`
+	Level       string     `json:"level,omitempty"`
+	Message     string     `json:"message,omitempty"`
+	Lines       []string   `json:"lines,omitempty"`
+	Output      string     `json:"output,omitempty"`
+	Seconds     float64    `json:"seconds,omitempty"`
+	Vertices    int        `json:"vertices,omitempty"`
+	Quads       int        `json:"quads,omitempty"`
+	NonQuads    int        `json:"nonQuads,omitempty"`
+	Triangles   int        `json:"triangles,omitempty"`
+	Version     string     `json:"version,omitempty"`
+	Input       string     `json:"input,omitempty"`
+	TargetQuads int        `json:"targetQuads,omitempty"`
+	Deviation   *Deviation `json:"deviation,omitempty"`
+	At          string     `json:"at,omitempty"`
+}
+
+// Deviation mirrors the CLI's deviation block: how far the output vertices sit
+// from the input surface.
+type Deviation struct {
+	Samples    int     `json:"samples"`
+	Unresolved int     `json:"unresolved"`
+	Mean       float64 `json:"mean"`
+	P50        float64 `json:"p50"`
+	P95        float64 `json:"p95"`
+	Max        float64 `json:"max"`
 }
 
 // Terminal reports whether the event ends the stream.

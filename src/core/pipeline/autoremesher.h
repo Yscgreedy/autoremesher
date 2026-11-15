@@ -56,6 +56,15 @@ struct HoleStats {
 struct PatchStats {
     size_t kept = 0;
     size_t dropped = 0;
+    // Shells are the number a modelling workflow watches, so the patch stage has
+    // to say whether the shell count it produced is by design or a weld that
+    // failed.  weldedVertices is what the weld actually merged; remainingShells
+    // is the component count of the merged output; reason is empty when nothing
+    // went wrong and names the failure otherwise.
+    size_t weldedVertices = 0;
+    size_t droppedByIsolation = 0;
+    size_t remainingShells = 0;
+    std::string reason;
 };
 
 // One entry of the phase report, machine readable.  accumulated figures are
@@ -358,11 +367,52 @@ public:
     void setSymmetryPlane(double offset)
     {
         m_symmetryPlane = offset;
+        m_symmetryPlaneKnown = true;
+    }
+
+    // 0 = mirror (cut, weld, mirror the kept half), 1 = check only, 2 = snap the
+    // near-plane vertices without cutting.  A single-view reconstruction is not
+    // symmetric and the mirror pass is destructive on one: measured on a shoe it
+    // cut 520 faces, left visible holes and pushed the deviation from 0.10 mm to
+    // 2.5 mm.  Measuring and snapping are safe there, mirroring is the caller's
+    // explicit choice.
+    void setSymmetryMode(int mode)
+    {
+        m_symmetryMode = mode;
+    }
+
+    void setSymmetryKeepPositive(bool keepPositive)
+    {
+        m_symmetryKeepPositive = keepPositive;
     }
 
     const SymmetryStats& symmetryStats() const
     {
         return m_symmetryStats;
+    }
+
+    const SymmetryCheck& symmetryCheck() const
+    {
+        return m_symmetryCheck;
+    }
+
+    const SymmetrySnapStats& symmetrySnapStats() const
+    {
+        return m_symmetrySnapStats;
+    }
+
+    // Quality of the output quads in the terms a retopology reviewer uses; filled
+    // by remesh() next to the topology counts.
+    const QualityStats& qualityStats() const
+    {
+        return m_qualityStats;
+    }
+
+    // Charts the seam splitter created for --uv-mode seam; 0 when the UVs were
+    // written per corner or per vertex.
+    size_t uvChartCount() const
+    {
+        return m_uvChartCount;
     }
 
     // Distance from the output vertices to the input surface.  Off by default: it
@@ -446,8 +496,15 @@ private:
     bool m_uvSeamSplitting = false;
     int m_symmetryAxis = 0;
     double m_symmetryPlane = 0.0;
+    bool m_symmetryPlaneKnown = false;
+    int m_symmetryMode = 0; // 0 mirror, 1 check, 2 snap
+    bool m_symmetryKeepPositive = true;
     double m_symmetryTolerance = 0.002;
     SymmetryStats m_symmetryStats;
+    SymmetryCheck m_symmetryCheck;
+    SymmetrySnapStats m_symmetrySnapStats;
+    QualityStats m_qualityStats;
+    size_t m_uvChartCount = 0;
     bool m_measureDeviation = false;
     DeviationStats m_deviation;
     bool m_relativePositionTolerance = true;

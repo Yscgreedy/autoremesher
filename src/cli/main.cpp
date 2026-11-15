@@ -7,13 +7,16 @@
  * the Go GUI can drive it without any Qt code in the process.
  */
 #include <AutoRemesher/AutoRemesher>
+#include <AutoRemesher/UvCharts>
 #include <AutoRemesher/Vector2>
 #include <AutoRemesher/Vector3>
 #include <core/base/logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +24,7 @@
 #include <iomanip>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -134,8 +138,28 @@ struct Options {
     bool measureDeviation = false;
     std::string uvMode = "corner";
     int symmetryAxis = 0; // 0 off, 1 x, 2 y, 3 z
+    // What the symmetry flag should do.  "mirror" is the historical behaviour
+    // (cut, weld, mirror); "check" only measures and "snap" only moves near-plane
+    // vertices, because a single-view reconstruction is not symmetric and
+    // cutting it is destructive.
+    std::string symmetryMode = "mirror";
+    bool symmetryKeepPositive = true;
     double symmetryPlane = 0.0;
+    bool symmetryPlaneSet = false;
     double symmetryTolerance = 0.002;
+    // Input inspection only: analyse, decide, exit.  No output file, no remesh.
+    bool checkOnly = false;
+    // A JSON file that overrides every knob the command line did not name.
+    std::string presetFile;
+    // Only affects the reported units (edge lengths, snap distances); the
+    // geometry and every threshold stay in model units.
+    std::string unitHint;
+    // Every flag the command line actually named, so a preset file can fill in
+    // the rest without silently overriding an explicit choice.
+    std::set<std::string> explicitFlags;
+    // Degenerate cleanup: zero length edges, degenerate and duplicate faces.
+    bool cleanDegenerate = true;
+    double maxAspect = 0.0; // 0 = report only, do not collapse anything
     int logLevel = 1; // 0 = silent, 1 = normal, 2 = debug (core Log::Level order)
     bool json = false;
     bool progress = false;
@@ -207,13 +231,18 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "                              UVs would stretch, seam cuts the mesh along the\n"
                      "                              chart boundaries so per-vertex UVs can describe\n"
                      "                              them exactly\n"
-                     "      --symmetry AXIS         x | y | z: snap the output onto its own mirror\n"
+                     "      --symmetry AXIS         x | y | z (mirror), or check | snap | mirror-half:\n"
                      "                              plane where both sides agree, and count where\n"
-                     "                              they do not (default off)\n"
+                     "                              they do not. check only measures, snap only moves\n"
+                     "                              near-plane vertices (no cut), mirror-half keeps one\n"
+                     "                              side and mirrors it (default off)\n"
                      "      --symmetry-plane F      coordinate of the mirror plane along the axis\n"
                      "                              (default 0, the coordinate plane)\n"
                      "      --symmetry-tolerance F  seam tolerance as a fraction of the bbox\n"
                      "                              diagonal (default 0.002)\n"
+                     "      --symmetry-mode M       check | snap | mirror-half: the same choice spelled out,\n"
+                     "                              for scripts that pass the axis separately\n"
+                     "      --symmetry-keep S       positive | negative: which side mirror-half keeps\n"
                      "\n"
                      "Remeshing:\n"
                      "  -q, --target-quads N        requested quad count (default 20000); the\n"
@@ -239,10 +268,20 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "      --legacy-holes          fixed fan hole filling\n"
                      "      --projected-caps        seal large holes with projected caps\n"
                      "      --local-remesh          energy guided topology pass\n"
+                     "      --clean-degenerate      weld zero length edges and drop degenerate or\n"
+                     "                              duplicate faces at the end of extraction (default)\n"
+                     "      --no-clean-degenerate   keep whatever the topology passes produced\n"
+                     "      --max-aspect F          collapse quads whose max/min edge ratio exceeds F\n"
+                     "                              (default 0 = only the degenerate ones are removed)\n"
                      "      --threads N             pin the TBB worker count (0 = all cores)\n"
                      "\n"
                      "Reporting:\n"
                      "      --json                  JSON-lines events on stdout (see docs/cli-protocol.md)\n"
+                     "      --check-only            analyse the input and exit: area/volume/bbox/unit\n"
+                     "                              guess/shell count and parameter advice, no output\n"
+                     "                              file and no remesh (result carries checkOnly)\n"
+                     "      --preset-file PATH      JSON file of knob overrides, applied after the preset\n"
+                     "      --unit-hint U           mm | cm | m: only changes the units the report prints\n"
                      "                              result carries topology, holes, patches, phases\n"
                      "      --progress              progress on stderr\n"
                      "      --verbose               per-phase report at the end\n"
@@ -255,6 +294,222 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "  -v, --version               version\n"
                      "\n"
                      "Exit codes: 0 success, 1 usage/input error, 2 remeshing failed, 3 output failed.\n";
+
+// ------------------------------------------------------------- preset file
+// A deliberately small JSON reader: the file is a flat object of knobs, and being
+// strict about what it understands is the point.  Silently ignoring an unknown key
+// is the worst outcome available - the caller believes its knob took effect and
+// every decision it makes afterwards is wrong.
+bool applyPresetFile(const std::string& path, Options* options, int* exitCode)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        fprintf(stderr, "error: failed to open preset file %s\n", displayPath(path).c_str());
+        *exitCode = 1;
+        return false;
+    }
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    const std::string text = buffer.str();
+
+    const auto namedAny = [options](std::initializer_list<const char*> flags) {
+        for (const char* flag : flags) {
+            if (options->explicitFlags.end() != options->explicitFlags.find(flag))
+                return true;
+        }
+        return false;
+    };
+
+    size_t cursor = 0;
+    size_t applied = 0;
+    bool sawObject = false;
+    while (cursor < text.size()) {
+        const char c = text[cursor];
+        if (c == '{') {
+            sawObject = true;
+            ++cursor;
+            continue;
+        }
+        if (c == '}' || c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            ++cursor;
+            continue;
+        }
+        if (c != '"') {
+            fprintf(stderr, "error: preset file %s is not a flat JSON object at offset %zu\n",
+                displayPath(path).c_str(), cursor);
+            *exitCode = 1;
+            return false;
+        }
+        size_t keyEnd = text.find('"', cursor + 1);
+        if (std::string::npos == keyEnd) {
+            *exitCode = 1;
+            return false;
+        }
+        const std::string key = text.substr(cursor + 1, keyEnd - cursor - 1);
+        cursor = keyEnd + 1;
+        while (cursor < text.size() && text[cursor] != ':')
+            ++cursor;
+        if (cursor >= text.size()) {
+            *exitCode = 1;
+            return false;
+        }
+        ++cursor;
+        while (cursor < text.size() && (text[cursor] == ' ' || text[cursor] == '\t'))
+            ++cursor;
+        bool quoted = false;
+        std::string value;
+        if (cursor < text.size() && text[cursor] == '"') {
+            quoted = true;
+            const size_t valueEnd = text.find('"', cursor + 1);
+            if (std::string::npos == valueEnd) {
+                *exitCode = 1;
+                return false;
+            }
+            value = text.substr(cursor + 1, valueEnd - cursor - 1);
+            cursor = valueEnd + 1;
+        } else {
+            while (cursor < text.size() && text[cursor] != ',' && text[cursor] != '}'
+                && text[cursor] != ' ' && text[cursor] != '\n' && text[cursor] != '\r') {
+                value.push_back(text[cursor]);
+                ++cursor;
+            }
+        }
+
+        char* end = nullptr;
+        const double number = quoted ? 0.0 : strtod(value.c_str(), &end);
+        const bool numeric = !quoted && end != value.c_str() && *end == '\0';
+        const bool flag = !quoted && (value == "true" || value == "false");
+        bool handled = true;
+
+        if (key == "targetQuads" && numeric) {
+            if (!namedAny({ "--target-quads", "-q" }))
+                options->targetQuads = static_cast<size_t>(std::max(1.0, number));
+        } else if (key == "adaptivity" && numeric) {
+            if (!namedAny({ "--adaptivity" }))
+                options->adaptivity = number;
+        } else if (key == "anisotropy" && numeric) {
+            if (!namedAny({ "--anisotropy" }))
+                options->anisotropy = number;
+        } else if (key == "sharpEdgeDegrees" && numeric) {
+            if (!namedAny({ "--sharp-edge" }))
+                options->sharpEdgeDegrees = number;
+        } else if (key == "smoothNormalDegrees" && numeric) {
+            if (!namedAny({ "--smooth-normal" }))
+                options->smoothNormalDegrees = number;
+        } else if (key == "edgeScaling" && numeric) {
+            if (!namedAny({ "--edge-scaling" }))
+                options->edgeScaling = number;
+        } else if (key == "keepIslandFraction" && numeric) {
+            if (!namedAny({ "--keep-island-fraction", "--keep-all-islands" }))
+                options->keepIslandFraction = number;
+        } else if (key == "maxAspect" && numeric) {
+            if (!namedAny({ "--max-aspect" }))
+                options->maxAspect = number;
+        } else if (key == "threads" && numeric) {
+            if (!namedAny({ "--threads" }))
+                options->threads = static_cast<int>(number);
+        } else if (key == "symmetryPlane" && numeric) {
+            if (!namedAny({ "--symmetry-plane" })) {
+                options->symmetryPlane = number;
+                options->symmetryPlaneSet = true;
+            }
+        } else if (key == "symmetryTolerance" && numeric) {
+            if (!namedAny({ "--symmetry-tolerance" }))
+                options->symmetryTolerance = number;
+        } else if (key == "preset" && quoted) {
+            if (!namedAny({ "--preset", "--model-type" })) {
+                std::string type = value;
+                if (type == "hardsurface" || type == "hard")
+                    type = "hard-surface";
+                if (nullptr != findPreset(type))
+                    options->preset = type;
+                else
+                    handled = false;
+            }
+        } else if (key == "uvMode" && quoted) {
+            if (!namedAny({ "--uv-mode" }) && (value == "corner" || value == "vertex" || value == "hybrid" || value == "seam"))
+                options->uvMode = value;
+            else if (namedAny({ "--uv-mode" }))
+                handled = true;
+            else
+                handled = false;
+        } else if (key == "unitHint" && quoted) {
+            if (!namedAny({ "--unit-hint" }) && (value == "mm" || value == "cm" || value == "m"))
+                options->unitHint = value;
+            else if (!namedAny({ "--unit-hint" }))
+                handled = false;
+        } else if (key == "symmetryMode" && quoted) {
+            if (!namedAny({ "--symmetry-mode", "--symmetry" })
+                && (value == "check" || value == "snap" || value == "mirror" || value == "mirror-half"))
+                options->symmetryMode = value == "mirror-half" ? "mirror" : value;
+            else if (!namedAny({ "--symmetry-mode", "--symmetry" }))
+                handled = false;
+        } else if (key == "symmetryAxis" && quoted) {
+            if (!namedAny({ "--symmetry" })) {
+                if (value == "x")
+                    options->symmetryAxis = 1;
+                else if (value == "y")
+                    options->symmetryAxis = 2;
+                else if (value == "z")
+                    options->symmetryAxis = 3;
+                else if (value == "none")
+                    options->symmetryAxis = 0;
+                else
+                    handled = false;
+            }
+        } else if (key == "exactTargetQuads" && flag) {
+            if (!namedAny({ "--exact-target-quads", "--legacy-target-quads" }))
+                options->exactTargetQuads = (value == "true");
+        } else if (key == "relativeTolerance" && flag) {
+            if (!namedAny({ "--relative-tolerance", "--absolute-tolerance" }))
+                options->relativeTolerance = (value == "true");
+        } else if (key == "weldPatches" && flag) {
+            if (!namedAny({ "--weld-patches" }))
+                options->weldPatches = (value == "true");
+        } else if (key == "gradedHoles" && flag) {
+            if (!namedAny({ "--graded-holes", "--legacy-holes" }))
+                options->gradedHoles = (value == "true");
+        } else if (key == "projectedCaps" && flag) {
+            if (!namedAny({ "--projected-caps" }))
+                options->projectedCaps = (value == "true");
+        } else if (key == "localRemesh" && flag) {
+            if (!namedAny({ "--local-remesh" }))
+                options->localRemesh = (value == "true");
+        } else if (key == "cleanDegenerate" && flag) {
+            if (!namedAny({ "--clean-degenerate", "--no-clean-degenerate" }))
+                options->cleanDegenerate = (value == "true");
+        } else if (key == "writeUvs" && flag) {
+            if (!namedAny({ "--no-uv" }))
+                options->writeUvs = (value == "true");
+        } else if (key == "writeNormals" && flag) {
+            if (!namedAny({ "--no-normals" }))
+                options->writeNormals = (value == "true");
+        } else if (key == "symmetryKeepPositive" && flag) {
+            if (!namedAny({ "--symmetry-keep" }))
+                options->symmetryKeepPositive = (value == "true");
+        } else {
+            handled = false;
+        }
+
+        if (!handled) {
+            // A warning, not a silent skip and not a hard failure: a typo in a
+            // shared preset file should be loud without stopping a batch run.
+            fprintf(stderr, "warning: preset file %s: ignored unknown or malformed key '%s'\n",
+                displayPath(path).c_str(), key.c_str());
+        } else {
+            ++applied;
+        }
+    }
+    if (!sawObject) {
+        fprintf(stderr, "error: preset file %s is not a JSON object\n", displayPath(path).c_str());
+        *exitCode = 1;
+        return false;
+    }
+    if (!options->quiet)
+        fprintf(stderr, "preset file: %s (%zu knob(s) applied, command line wins)\n",
+            displayPath(path).c_str(), applied);
+    return true;
+}
 
 bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
 {
@@ -367,13 +622,64 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
                 options->symmetryAxis = 3;
             else if (axis.empty() || axis == "none" || axis == "off")
                 options->symmetryAxis = 0;
-            else {
-                fprintf(stderr, "unknown symmetry axis '%s' (x|y|z|none)\n", axis.c_str());
+            else if (axis == "check" || axis == "snap") {
+                // A mode without an axis still needs one to measure the mirror
+                // plane, and x is what a single-view asset is almost always
+                // built along.
+                options->symmetryMode = axis;
+                if (0 == options->symmetryAxis)
+                    options->symmetryAxis = 1;
+            } else if (axis == "mirror" || axis == "mirror-half") {
+                options->symmetryMode = "mirror";
+                if (0 == options->symmetryAxis)
+                    options->symmetryAxis = 1;
+            } else {
+                fprintf(stderr, "unknown symmetry axis '%s' (x|y|z|check|snap|mirror-half|none)\n", axis.c_str());
+                *exitCode = 1;
+                return false;
+            }
+        } else if (arg == "--symmetry-mode") {
+            const std::string mode = value();
+            if (mode == "check" || mode == "snap" || mode == "mirror" || mode == "mirror-half") {
+                options->symmetryMode = mode == "mirror-half" ? "mirror" : mode;
+            } else {
+                fprintf(stderr, "unknown symmetry mode '%s' (check|snap|mirror-half)\n", mode.c_str());
+                *exitCode = 1;
+                return false;
+            }
+        } else if (arg == "--symmetry-keep") {
+            const std::string side = value();
+            if (side == "positive" || side == "+" || side == "plus") {
+                options->symmetryKeepPositive = true;
+            } else if (side == "negative" || side == "-" || side == "minus") {
+                options->symmetryKeepPositive = false;
+            } else {
+                fprintf(stderr, "unknown symmetry side '%s' (positive|negative)\n", side.c_str());
                 *exitCode = 1;
                 return false;
             }
         } else if (arg == "--symmetry-plane") {
             options->symmetryPlane = number();
+            options->symmetryPlaneSet = true;
+        } else if (arg == "--check-only") {
+            options->checkOnly = true;
+        } else if (arg == "--preset-file") {
+            options->presetFile = value();
+        } else if (arg == "--unit-hint") {
+            const std::string unit = value();
+            if (unit == "mm" || unit == "cm" || unit == "m") {
+                options->unitHint = unit;
+            } else {
+                fprintf(stderr, "unknown unit '%s' (mm|cm|m)\n", unit.c_str());
+                *exitCode = 1;
+                return false;
+            }
+        } else if (arg == "--no-clean-degenerate") {
+            options->cleanDegenerate = false;
+        } else if (arg == "--clean-degenerate") {
+            options->cleanDegenerate = true;
+        } else if (arg == "--max-aspect") {
+            options->maxAspect = number();
         } else if (arg == "--symmetry-tolerance") {
             options->symmetryTolerance = number();
         } else if (arg == "--deviation") {
@@ -431,6 +737,8 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
         }
         if (*exitCode)
             return false;
+        if (!arg.empty() && '-' == arg[0])
+            options->explicitFlags.insert(arg);
     }
     if (options->input.empty()) {
         fputs(kUsage, stderr);
@@ -440,6 +748,11 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
     // Presets are resolved last so an explicit knob always beats the preset,
     // whatever order the flags appeared in.
     applyPreset(options);
+    // The file fills in what neither the command line nor the preset named.  A
+    // file is how a pipeline pins "its" knobs once instead of repeating twelve
+    // flags per call, so it must never quietly beat a flag the caller did pass.
+    if (!options->presetFile.empty() && !applyPresetFile(options->presetFile, options, exitCode))
+        return false;
     return true;
 }
 
@@ -530,6 +843,173 @@ bool loadObj(const std::string& path,
     return true;
 }
 
+// The written OBJ read back as polygons.  loadObj triangulates because the
+// remesher wants triangles, and triangulating here would erase exactly what the
+// comparison is about: a quad written twice is two identical quads, but four
+// identical triangles, and the edge counts differ.
+bool loadObjPolygons(const std::string& path,
+    std::vector<AutoRemesher::Vector3>* vertices,
+    std::vector<std::vector<size_t>>* faces,
+    std::string* error)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        *error = "failed to reopen " + displayPath(path);
+        return false;
+    }
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.size() < 2)
+            continue;
+        if (line[0] == 'v' && (line[1] == ' ' || line[1] == '\t')) {
+            const char* cursor = line.c_str() + 2;
+            char* end = nullptr;
+            double coordinates[3] = { 0.0, 0.0, 0.0 };
+            bool ok = true;
+            for (int axis = 0; axis < 3; ++axis) {
+                coordinates[axis] = strtod(cursor, &end);
+                if (end == cursor) {
+                    ok = false;
+                    break;
+                }
+                cursor = end;
+            }
+            if (ok)
+                vertices->push_back(AutoRemesher::Vector3(coordinates[0], coordinates[1], coordinates[2]));
+        } else if (line[0] == 'f' && (line[1] == ' ' || line[1] == '\t')) {
+            const size_t vertexCount = vertices->size();
+            std::vector<size_t> face;
+            const char* cursor = line.c_str() + 2;
+            while (*cursor) {
+                while (*cursor == ' ' || *cursor == '\t')
+                    ++cursor;
+                if (!*cursor)
+                    break;
+                char* end = nullptr;
+                const long index = strtol(cursor, &end, 10);
+                if (end == cursor)
+                    break;
+                cursor = end;
+                while (*cursor && *cursor != ' ' && *cursor != '\t')
+                    ++cursor;
+                if (0 == index)
+                    continue;
+                size_t resolved = 0;
+                if (index > 0) {
+                    resolved = static_cast<size_t>(index - 1);
+                } else {
+                    const size_t back = static_cast<size_t>(-index);
+                    if (back > vertexCount)
+                        continue;
+                    resolved = vertexCount - back;
+                }
+                if (resolved >= vertexCount)
+                    continue;
+                face.push_back(resolved);
+            }
+            if (face.size() >= 3)
+                faces->push_back(std::move(face));
+        }
+    }
+    return true;
+}
+
+struct GeometryExtent {
+    double area = 0.0;
+    double volume = 0.0;
+    AutoRemesher::Vector3 minimum;
+    AutoRemesher::Vector3 maximum;
+    double diagonal = 0.0;
+    size_t degenerateEdges = 0;
+};
+
+// Area, signed volume and extent of a triangle soup.  The volume is the signed
+// divergence sum, so it is only meaningful for a closed shell; a caller can tell
+// by the boundary edge count in the same report.
+GeometryExtent measureGeometry(const std::vector<AutoRemesher::Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& triangles)
+{
+    GeometryExtent extent;
+    if (vertices.empty())
+        return extent;
+    extent.minimum = vertices[0];
+    extent.maximum = vertices[0];
+    for (const auto& vertex : vertices) {
+        for (int i = 0; i < 3; ++i) {
+            extent.minimum[i] = std::min(extent.minimum[i], vertex[i]);
+            extent.maximum[i] = std::max(extent.maximum[i], vertex[i]);
+        }
+    }
+    extent.diagonal = (extent.maximum - extent.minimum).length();
+    const double minimumEdge = std::max(1e-12, 1e-6 * (extent.diagonal > 0.0 ? extent.diagonal : 1.0));
+    std::set<std::pair<size_t, size_t>> degenerate;
+    for (const auto& triangle : triangles) {
+        if (triangle.size() < 3)
+            continue;
+        const AutoRemesher::Vector3& a = vertices[triangle[0]];
+        const AutoRemesher::Vector3& b = vertices[triangle[1]];
+        const AutoRemesher::Vector3& c = vertices[triangle[2]];
+        extent.area += 0.5 * AutoRemesher::Vector3::crossProduct(b - a, c - a).length();
+        extent.volume += AutoRemesher::Vector3::dotProduct(a, AutoRemesher::Vector3::crossProduct(b, c)) / 6.0;
+        for (size_t i = 0; i < 3; ++i) {
+            const size_t first = triangle[i];
+            const size_t second = triangle[(i + 1) % 3];
+            if ((vertices[first] - vertices[second]).length() > minimumEdge)
+                continue;
+            degenerate.insert(first < second ? std::make_pair(first, second)
+                                             : std::make_pair(second, first));
+        }
+    }
+    extent.degenerateEdges = degenerate.size();
+    return extent;
+}
+
+// The bounding box diagonal is the only scale cue a bare mesh carries, so the
+// unit is a guess about the file, not a measurement of it.  The bucket
+// boundaries are chosen so a 26 cm shoe, a 2.6 m character and a 260 mm machine
+// part all land in the expected bucket.
+struct UnitGuess {
+    const char* name = "unknown";
+    double scaleToMm = 1.0;
+};
+
+UnitGuess guessUnit(double diagonal)
+{
+    UnitGuess guess;
+    if (!(diagonal > 0.0))
+        return guess;
+    if (diagonal < 1.0) {
+        guess.name = "m";
+        guess.scaleToMm = 1000.0;
+    } else if (diagonal < 100.0) {
+        guess.name = "cm";
+        guess.scaleToMm = 10.0;
+    } else {
+        guess.name = "mm";
+        guess.scaleToMm = 1.0;
+    }
+    return guess;
+}
+
+// --unit-hint wins over the guess: it is the caller saying "I know".
+UnitGuess resolveUnit(const std::string& hint, double diagonal)
+{
+    UnitGuess guess = guessUnit(diagonal);
+    if (hint == "mm") {
+        guess.name = "mm";
+        guess.scaleToMm = 1.0;
+    } else if (hint == "cm") {
+        guess.name = "cm";
+        guess.scaleToMm = 10.0;
+    } else if (hint == "m") {
+        guess.name = "m";
+        guess.scaleToMm = 1000.0;
+    }
+    return guess;
+}
+
 // Area weighted vertex normals: a quad contributes one Newell normal to each of
 // its corners, so a vertex on a flat panel is not dragged around by a sliver.
 std::vector<AutoRemesher::Vector3> computeVertexNormals(
@@ -573,7 +1053,11 @@ bool writeObj(const std::string& path,
     size_t* writtenUvs,
     std::string* error)
 {
-    FILE* file = fopen(path.c_str(), "wb");
+    // Write beside the target and rename once: a cancelled or crashed run must not
+    // leave a half-written OBJ that a caller can mistake for a result.  Same
+    // directory, so the rename is atomic on every filesystem that matters.
+    const std::string temporaryPath = path + ".tmp";
+    FILE* file = fopen(temporaryPath.c_str(), "wb");
     if (nullptr == file) {
         *error = "failed to write " + displayPath(path);
         return false;
@@ -708,7 +1192,20 @@ bool writeObj(const std::string& path,
     }
     if (nullptr != writtenUvs)
         *writtenUvs = cornerCursor;
-    return 0 == fclose(file);
+    const bool closed = 0 == fclose(file);
+    if (!closed) {
+        std::remove(temporaryPath.c_str());
+        *error = "failed to flush " + displayPath(path);
+        return false;
+    }
+    // The rename is what makes the result appear: until this line the caller's
+    // path does not exist, so a cancel in the middle leaves nothing to pick up.
+    if (0 != std::rename(temporaryPath.c_str(), path.c_str())) {
+        std::remove(temporaryPath.c_str());
+        *error = "failed to move the written mesh onto " + displayPath(path);
+        return false;
+    }
+    return true;
 }
 
 std::string defaultOutputPath(const std::string& input)
@@ -723,10 +1220,25 @@ std::string defaultOutputPath(const std::string& input)
 
 // -------------------------------------------------------------------- progress
 
+// A cancelled run must not leave a file behind that looks like a result, and it
+// must say so on the protocol instead of dying silently.  The flag is set from the
+// signal handler (only a store, which is all a handler may do) and acted on at the
+// next progress callback, i.e. inside the core, where the expensive work actually
+// happens.
+std::atomic<bool> g_interrupted(false);
+
+extern "C" void handleInterrupt(int)
+{
+    g_interrupted.store(true);
+}
+
 struct ProgressSink {
     std::mutex mutex;
     bool json = false;
     bool human = false;
+    // Where the writer is parked while the mesh is being written, so an abort can
+    // remove it: the temporary is not an OBJ a caller should ever pick up.
+    std::string temporaryOutput;
     double lastValue = -1.0;
     std::string lastStatus;
     std::chrono::steady_clock::time_point lastEmit;
@@ -738,6 +1250,15 @@ void reportProgress(void* tag, float progress, const char* status)
     ProgressSink* sink = static_cast<ProgressSink*>(tag);
     if (nullptr == sink)
         return;
+    if (g_interrupted.load()) {
+        // Exit code 130 is the shell's convention for "died on SIGINT", so a batch
+        // driver sees a cancel without having to parse stderr.
+        if (sink->json)
+            emitLine("{\"type\":\"abort\",\"phase\":\"" + jsonEscape(nullptr != status ? status : "") + "\"}");
+        if (!sink->temporaryOutput.empty())
+            std::remove(sink->temporaryOutput.c_str());
+        std::_Exit(130);
+    }
     std::lock_guard<std::mutex> lock(sink->mutex);
     double value = static_cast<double>(progress);
     if (!(value >= 0.0))
@@ -905,6 +1426,126 @@ const char* symmetryAxisName(int axis)
     }
 }
 
+// Quality of the output quads.  These are the numbers a retopology reviewer looks
+// at, and every one of them used to require a second tool: poles away from the
+// border, how far a quad is from a square, and whether an edge has collapsed to
+// nothing.  The units are the input's units; unit_scale_to_mm is elsewhere in the
+// same report so a caller can print millimetres without guessing.
+std::string qualityJson(const AutoRemesher::QualityStats& quality)
+{
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out << "{\"poles_pct\":" << std::setprecision(2) << quality.polesPct
+        << ",\"pole_count\":" << quality.poleCount
+        << ",\"interior_vertices\":" << quality.interiorVertices
+        << ",\"valence_max\":" << quality.valenceMax
+        << ",\"valence_hist\":{\"3\":" << quality.valence3
+        << ",\"4\":" << quality.valence4
+        << ",\"5\":" << quality.valence5
+        << ",\"gt5\":" << quality.valenceGt5 << "}"
+        << ",\"edge_len\":{\"min\":" << std::setprecision(9) << quality.edgeLength.min
+        << ",\"p50\":" << quality.edgeLength.p50
+        << ",\"p95\":" << quality.edgeLength.p95
+        << ",\"max\":" << quality.edgeLength.max << "}"
+        << ",\"quad_aspect\":{\"p50\":" << std::setprecision(4) << quality.quadAspect.p50
+        << ",\"p95\":" << quality.quadAspect.p95
+        << ",\"max\":" << quality.quadAspect.max << "}"
+        << ",\"quad_aspect_area\":{\"max\":" << quality.quadAspectAreaMax << "}"
+        << ",\"zero_length_edges\":" << quality.zeroLengthEdges
+        << ",\"degenerate_faces\":" << quality.degenerateFaces
+        << "}";
+    return out.str();
+}
+
+bool topologiesAgree(const AutoRemesher::TopologyStats& first,
+    const AutoRemesher::TopologyStats& second)
+{
+    return first.vertices == second.vertices
+        && first.faces == second.faces
+        && first.quads == second.quads
+        && first.nonQuads == second.nonQuads
+        && first.boundaryEdges == second.boundaryEdges
+        && first.boundaryLoops == second.boundaryLoops
+        && first.nonManifoldEdges == second.nonManifoldEdges
+        && first.components == second.components
+        && first.degenerateFaces == second.degenerateFaces;
+}
+
+// Whether the UV layout can be baked into a texture without two faces fighting
+// for the same texels.  area > 1 means the layout overlaps itself even before
+// the per-triangle test runs, so both have to hold.
+std::string uvStatsJson(const AutoRemesher::UvStats& stats, const std::string& mode,
+    size_t chartCount)
+{
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    const size_t charts = chartCount > 0 ? chartCount : stats.chartCount;
+    out << "{\"mode\":\"" << mode << "\""
+        << ",\"area\":" << std::setprecision(6) << stats.area
+        << ",\"overlap_pct\":" << std::setprecision(3) << stats.overlapPct
+        << ",\"chart_count\":" << charts
+        << ",\"max_stretch\":" << std::setprecision(4) << stats.maxStretch
+        << ",\"median_stretch\":" << stats.medianStretch
+        << ",\"stray_triangles\":" << stats.strayTriangles
+        << ",\"bakeable\":" << ((stats.area > 1e-12 && stats.area <= 1.0 + 1e-6 && stats.overlapPct < 1.0) ? "true" : "false")
+        << "}";
+    return out.str();
+}
+
+// The scale the budget was solved with, next to the count it produced.  Without
+// both, "why did 20k come out as 17k" has no answer in the report.
+std::string budgetJson(const Options& options, size_t quads, double error,
+    const AutoRemesher::TopologyStats& outputStats)
+{
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out << "{\"requested\":" << options.targetQuads
+        << ",\"actual\":" << quads
+        << ",\"error\":" << std::setprecision(4) << error
+        << ",\"withinTolerance\":" << (std::fabs(error) <= 0.05 ? "true" : "false")
+        << ",\"mode\":\"" << (options.exactTargetQuads ? "solved" : "average-edge-length") << "\""
+        << ",\"non_quads\":" << outputStats.nonQuads
+        << "}";
+    return out.str();
+}
+
+// Every knob as the run actually used it: after --preset, after --preset-file,
+// after the command line.  Keys keep the CLI spellings so a caller can diff this
+// block against the command line it sent instead of reading the source.
+std::string effectiveParamsJson(const Options& options)
+{
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out << "{\"targetQuads\":" << options.targetQuads
+        << ",\"adaptivity\":" << std::setprecision(4) << options.adaptivity
+        << ",\"anisotropy\":" << options.anisotropy
+        << ",\"sharpEdgeDegrees\":" << options.sharpEdgeDegrees
+        << ",\"smoothNormalDegrees\":" << options.smoothNormalDegrees
+        << ",\"edgeScaling\":" << options.edgeScaling
+        << ",\"preset\":\"" << jsonEscape(options.preset) << "\""
+        << ",\"exactTargetQuads\":" << (options.exactTargetQuads ? "true" : "false")
+        << ",\"relativeTolerance\":" << (options.relativeTolerance ? "true" : "false")
+        << ",\"keepIslandFraction\":" << options.keepIslandFraction
+        << ",\"weldPatches\":" << (options.weldPatches ? "true" : "false")
+        << ",\"gradedHoles\":" << (options.gradedHoles ? "true" : "false")
+        << ",\"projectedCaps\":" << (options.projectedCaps ? "true" : "false")
+        << ",\"localRemesh\":" << (options.localRemesh ? "true" : "false")
+        << ",\"cleanDegenerate\":" << (options.cleanDegenerate ? "true" : "false")
+        << ",\"maxAspect\":" << options.maxAspect
+        << ",\"threads\":" << options.threads
+        << ",\"uvMode\":\"" << jsonEscape(options.uvMode) << "\""
+        << ",\"writeUvs\":" << (options.writeUvs ? "true" : "false")
+        << ",\"writeNormals\":" << (options.writeNormals ? "true" : "false")
+        << ",\"symmetryMode\":\"" << jsonEscape(options.symmetryMode) << "\""
+        << ",\"symmetryKeepPositive\":" << (options.symmetryKeepPositive ? "true" : "false")
+        << ",\"symmetryAxis\":\"" << symmetryAxisName(options.symmetryAxis) << "\""
+        << ",\"symmetryPlane\":" << std::setprecision(6) << options.symmetryPlane
+        << ",\"symmetryTolerance\":" << options.symmetryTolerance
+        << ",\"unitHint\":\"" << jsonEscape(options.unitHint.empty() ? "guess" : options.unitHint) << "\""
+        << "}";
+    return out.str();
+}
+
 void reportTargetHealth(const Options& options, size_t requested, size_t actual,
     const AutoRemesher::HoleStats& holes)
 {
@@ -933,6 +1574,123 @@ void reportTargetHealth(const Options& options, size_t requested, size_t actual,
     }
 }
 
+// What --check-only recommends, and why.  The point of the advice block is that
+// a batch runner does not have to pay for a full remesh to find out that the
+// file it was handed needs --projected-caps: every field here is derived from the
+// input alone, and the reason string is what a human reads when the advice
+// disagrees with their own judgement.
+struct Advisory {
+    std::string preset = "organic";
+    bool weldPatches = false;
+    bool projectedCaps = false;
+    bool expectHoles = false;
+    double sharpEdgeShare = 0.0; // share of edges whose dihedral exceeds 40 deg
+    size_t longestBoundaryLoop = 0;
+    std::string reason;
+};
+
+Advisory buildAdvisory(const std::vector<AutoRemesher::Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& triangles,
+    const AutoRemesher::TopologyStats& stats)
+{
+    Advisory advice;
+    advice.weldPatches = stats.components > 1;
+    advice.expectHoles = stats.boundaryLoops > 0;
+
+    // One pass over the triangle edges: dihedral angle for the crease share, and
+    // the boundary edge graph for the longest open loop.
+    std::map<std::pair<size_t, size_t>, std::vector<size_t>> edgeTriangles;
+    std::vector<AutoRemesher::Vector3> faceNormals(triangles.size());
+    for (size_t index = 0; index < triangles.size(); ++index) {
+        const auto& triangle = triangles[index];
+        if (triangle.size() < 3)
+            continue;
+        const AutoRemesher::Vector3& a = vertices[triangle[0]];
+        const AutoRemesher::Vector3& b = vertices[triangle[1]];
+        const AutoRemesher::Vector3& c = vertices[triangle[2]];
+        AutoRemesher::Vector3 normal = AutoRemesher::Vector3::crossProduct(b - a, c - a);
+        const double length = normal.length();
+        faceNormals[index] = length > 0.0 ? normal * (1.0 / length) : AutoRemesher::Vector3();
+        for (size_t i = 0; i < 3; ++i) {
+            const size_t first = triangle[i];
+            const size_t second = triangle[(i + 1) % 3];
+            const auto edge = first < second ? std::make_pair(first, second)
+                                             : std::make_pair(second, first);
+            edgeTriangles[edge].push_back(index);
+        }
+    }
+    size_t measuredEdges = 0;
+    size_t sharpEdges = 0;
+    std::map<size_t, std::vector<size_t>> boundaryNeighbors;
+    for (const auto& it : edgeTriangles) {
+        if (it.second.size() > 2)
+            continue;
+        ++measuredEdges;
+        if (2 == it.second.size()) {
+            const double cosine = AutoRemesher::Vector3::dotProduct(
+                faceNormals[it.second[0]], faceNormals[it.second[1]]);
+            const double degrees = std::acos(std::max(-1.0, std::min(1.0, cosine))) * 180.0 / 3.14159265358979323846;
+            if (degrees > 40.0)
+                ++sharpEdges;
+        } else {
+            boundaryNeighbors[it.first.first].push_back(it.first.second);
+            boundaryNeighbors[it.first.second].push_back(it.first.first);
+        }
+    }
+    advice.sharpEdgeShare = measuredEdges > 0 ? (double)sharpEdges / (double)measuredEdges : 0.0;
+    // A crease-heavy model wants the hard-surface point: the preset marks more
+    // edges sharp and lets density follow curvature less, which is what keeps flat
+    // panels evenly dense.
+    advice.preset = advice.sharpEdgeShare > 0.05 ? "hard-surface" : "organic";
+
+    // Longest boundary walk, by degree-2 chaining: the graded hole filler gives up
+    // above 65 edges unless projected caps are allowed, so that number is the
+    // advice threshold, not a guess.
+    std::set<size_t> visited;
+    for (const auto& it : boundaryNeighbors) {
+        if (visited.end() != visited.find(it.first))
+            continue;
+        size_t length = 0;
+        size_t current = it.first;
+        while (visited.end() == visited.find(current)) {
+            visited.insert(current);
+            ++length;
+            size_t next = current;
+            bool advanced = false;
+            for (const size_t candidate : boundaryNeighbors[current]) {
+                if (visited.end() == visited.find(candidate)) {
+                    next = candidate;
+                    advanced = true;
+                    break;
+                }
+            }
+            if (!advanced)
+                break;
+            current = next;
+        }
+        advice.longestBoundaryLoop = std::max(advice.longestBoundaryLoop, length);
+    }
+    advice.projectedCaps = advice.longestBoundaryLoop > 65;
+
+    std::ostringstream reason;
+    reason.setf(std::ios::fixed);
+    reason.precision(1);
+    if (advice.expectHoles)
+        reason << stats.boundaryLoops << " open boundary loop(s), longest " << advice.longestBoundaryLoop
+               << " edge(s); the output keeps a boundary unless the hole is small enough to fill";
+    else
+        reason << "closed shell, no boundary to fill";
+    if (advice.weldPatches)
+        reason << "; " << stats.components
+               << " component(s) means each is remeshed as its own island, so --weld-patches keeps them joined";
+    if (advice.projectedCaps)
+        reason << "; a loop above 65 edges is only sealed with --projected-caps";
+    reason << "; " << sharpEdges << " of " << measuredEdges << " edges are creases, preset "
+           << advice.preset;
+    advice.reason = reason.str();
+    return advice;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -947,6 +1705,13 @@ int main(int argc, char** argv)
     // The core library no longer writes to stderr on its own: this sink is what
     // turns its phase report and debug traces into lines the CLI owns, so
     // --quiet can be quiet and --verbose can print exactly once.
+    // A cancel is acted on inside the core's progress callback, which is where the
+    // work actually is; the handler itself only sets the flag.
+    std::signal(SIGINT, handleInterrupt);
+#ifdef SIGTERM
+    std::signal(SIGTERM, handleInterrupt);
+#endif
+
     AutoRemesher::Log::setSink(&stderrLogSink);
     AutoRemesher::Log::setLevel(options.quiet ? AutoRemesher::Log::Silent
                                               : (options.logLevel >= 2 ? AutoRemesher::Log::Debug
@@ -987,6 +1752,8 @@ int main(int argc, char** argv)
     ProgressSink sink;
     sink.json = options.json;
     sink.human = options.progress && !options.json;
+    // The writer's staging path, so an abort before the rename can clean it up.
+    sink.temporaryOutput = options.output + ".tmp";
 
     AutoRemesher::AutoRemesher remesher(vertices, triangles);
     remesher.setTargetTriangleCount(options.targetQuads * 2);
@@ -1018,8 +1785,14 @@ int main(int argc, char** argv)
             fprintf(stderr, "warning: seam splitting is disabled with --symmetry; UVs stay per-vertex\n");
     }
     remesher.setSymmetryAxis(options.symmetryAxis);
-    remesher.setSymmetryPlane(options.symmetryPlane);
+    // Only an explicitly named plane overrides the estimate: a check on a model
+    // that is not centred on the origin would otherwise measure against a plane
+    // the caller never chose.
+    if (options.symmetryPlaneSet)
+        remesher.setSymmetryPlane(options.symmetryPlane);
     remesher.setSymmetryTolerance(options.symmetryTolerance);
+    remesher.setSymmetryMode(options.symmetryMode == "check" ? 1 : (options.symmetryMode == "snap" ? 2 : 0));
+    remesher.setSymmetryKeepPositive(options.symmetryKeepPositive);
     // --verbose prints the report itself below, so the library must not print it
     // a second time; --quiet suppresses it entirely.
     remesher.setReportEnabled(!options.quiet && !options.verbose);
@@ -1031,12 +1804,74 @@ int main(int argc, char** argv)
     // Describe the input before spending minutes on it.  A shell with thousands
     // of boundary edges is going to keep a boundary; the run says so up front
     // instead of leaving it to be discovered in another tool afterwards.
+    const auto analysisStart = std::chrono::steady_clock::now();
     remesher.analyzeInput();
+    const double analysisSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - analysisStart)
+                                       .count();
     reportInputHealth(options, remesher.inputStats());
     if (options.json) {
         std::ostringstream event;
         event << "{\"type\":\"input\",\"topology\":" << topologyJson(remesher.inputStats()) << "}";
         emitLine(event.str());
+    }
+
+    if (options.checkOnly) {
+        // Analyse and stop.  Everything below costs seconds to minutes, and a batch
+        // runner asks "is this file worth remeshing, and with which flags" twenty
+        // times before it asks for one remesh.  Nothing is written: the point of
+        // the mode is that it cannot leave a half-described artifact behind.
+        const GeometryExtent extent = measureGeometry(vertices, triangles);
+        const UnitGuess unit = resolveUnit(options.unitHint, extent.diagonal);
+        const AutoRemesher::TopologyStats& inputStats = remesher.inputStats();
+        const Advisory advice = buildAdvisory(vertices, triangles, inputStats);
+        const bool volumeClosed = 0 == inputStats.boundaryEdges;
+        if (options.json) {
+            std::ostringstream payload;
+            payload.setf(std::ios::fixed);
+            payload << "{\"type\":\"result\",\"checkOnly\":true,\"output\":null"
+                    << ",\"seconds\":" << std::setprecision(3) << analysisSeconds
+                    << ",\"topology\":{\"input\":" << topologyJson(inputStats) << "}"
+                    << ",\"vertices\":" << vertices.size()
+                    << ",\"triangles\":" << triangles.size()
+                    << ",\"area\":" << std::setprecision(9) << extent.area
+                    << ",\"volume\":" << std::setprecision(9) << (volumeClosed ? extent.volume : 0.0)
+                    << ",\"volume_closed\":" << (volumeClosed ? "true" : "false")
+                    << ",\"bbox\":{\"min\":[" << extent.minimum.x() << "," << extent.minimum.y() << "," << extent.minimum.z() << "]"
+                    << ",\"max\":[" << extent.maximum.x() << "," << extent.maximum.y() << "," << extent.maximum.z() << "]"
+                    << ",\"diagonal\":" << extent.diagonal << "}"
+                    << ",\"unit_guess\":\"" << unit.name << "\""
+                    << ",\"unit_scale_to_mm\":" << unit.scaleToMm
+                    << ",\"boundary_loops\":" << inputStats.boundaryLoops
+                    << ",\"boundary_edges\":" << inputStats.boundaryEdges
+                    << ",\"degenerate_edges\":" << extent.degenerateEdges
+                    << ",\"shell_count\":" << inputStats.components
+                    << ",\"advice\":{\"preset\":\"" << advice.preset << "\""
+                    << ",\"weld_patches\":" << (advice.weldPatches ? "true" : "false")
+                    << ",\"projected_caps\":" << (advice.projectedCaps ? "true" : "false")
+                    << ",\"expect_holes\":" << (advice.expectHoles ? "true" : "false")
+                    << ",\"sharp_edge_share\":" << std::setprecision(4) << advice.sharpEdgeShare
+                    << ",\"longest_boundary_loop\":" << advice.longestBoundaryLoop
+                    << ",\"reason\":\"" << jsonEscape(advice.reason) << "\"}"
+                    << ",\"effective_params\":" << effectiveParamsJson(options)
+                    << "}";
+            emitLine(payload.str());
+        } else if (!options.quiet) {
+            printf("check: %s\n", displayPath(options.input).c_str());
+            printf("  %.3f s, %zu vertices, %zu triangles, %.4g %s^2 area, %.4g %s^3 volume%s\n",
+                analysisSeconds, vertices.size(), triangles.size(), extent.area, unit.name,
+                volumeClosed ? extent.volume : 0.0, unit.name, volumeClosed ? "" : " (open shell)");
+            printf("  bbox: %.6g x %.6g x %.6g %s (diagonal %.6g)\n",
+                extent.maximum.x() - extent.minimum.x(), extent.maximum.y() - extent.minimum.y(),
+                extent.maximum.z() - extent.minimum.z(), unit.name, extent.diagonal);
+            printf("  topology: %zu shell(s), %zu boundary edge(s) in %zu loop(s), %zu degenerate edge(s)\n",
+                inputStats.components, inputStats.boundaryEdges, inputStats.boundaryLoops,
+                extent.degenerateEdges);
+            printf("  advice: preset %s%s%s; %s\n", advice.preset.c_str(),
+                advice.weldPatches ? ", weld-patches" : "", advice.projectedCaps ? ", projected-caps" : "",
+                advice.reason.c_str());
+        }
+        return 0;
     }
 
     // One scheduler for the whole run: this is how --threads is pinned.
@@ -1097,6 +1932,56 @@ int main(int argc, char** argv)
     if (options.uvMode == "seam" && uvMode == "vertex")
         uvMode = "seam";
 
+    // Re-read what was actually written.  The topology block above describes the
+    // mesh in memory, and a caller comparing it against its own measurement of the
+    // file is entitled to know the two agree: they did not, once - duplicate faces
+    // in the file turned boundary edges into three-face edges, which is exactly
+    // what an outside tool reports as non-manifold.
+    std::vector<AutoRemesher::Vector3> writtenVertices;
+    std::vector<std::vector<size_t>> writtenFaces;
+    bool haveExported = false;
+    AutoRemesher::TopologyStats exportedStats;
+    {
+        std::string readError;
+        if (loadObjPolygons(options.output, &writtenVertices, &writtenFaces, &readError)) {
+            exportedStats = AutoRemesher::analyzeTopology(writtenVertices, writtenFaces);
+            haveExported = true;
+        } else {
+            emitWarning(options, "output_reload_failed", readError, 0);
+        }
+    }
+    AutoRemesher::QualityStats quality = remesher.qualityStats();
+    AutoRemesher::UvStats uvStats;
+    bool haveUvStats = false;
+    if (options.writeUvs && uvMode != "none") {
+        // Measure the channel that was actually written, resolved to one UV pair
+        // per face corner: corner and hybrid carry per-corner UVs (hybrid only for
+        // the faces the vertex UVs would have stretched), vertex and seam carry one
+        // UV per vertex.  Flattening both to corners is what makes the four modes
+        // comparable, and it is exactly what a baker sees in the file.
+        const std::vector<std::vector<AutoRemesher::Vector2>>& cornerUvs = remesher.remeshedFaceUvs();
+        const std::vector<AutoRemesher::Vector2>& vertexUvsRef = remesher.remeshedVertexUvs();
+        const std::vector<std::vector<size_t>>& uvFaces = remesher.remeshedQuads();
+        std::vector<std::vector<AutoRemesher::Vector2>> measuredFaceUvs(uvFaces.size());
+        for (size_t index = 0; index < uvFaces.size(); ++index) {
+            if (index < cornerUvs.size() && cornerUvs[index].size() == uvFaces[index].size()) {
+                measuredFaceUvs[index] = cornerUvs[index];
+                continue;
+            }
+            measuredFaceUvs[index].resize(uvFaces[index].size());
+            for (size_t corner = 0; corner < uvFaces[index].size(); ++corner) {
+                const size_t vertex = uvFaces[index][corner];
+                measuredFaceUvs[index][corner] = vertex < vertexUvsRef.size()
+                    ? vertexUvsRef[vertex]
+                    : AutoRemesher::Vector2();
+            }
+        }
+        uvStats = AutoRemesher::collectUvStats(remesher.remeshedVertices(), uvFaces,
+            measuredFaceUvs, std::vector<int>());
+        uvStats.chartCount = remesher.uvChartCount();
+        haveUvStats = true;
+    }
+
     if (options.verbose) {
         if (options.json) {
             emitLine(phaseReportJson(remesher.phaseReport()));
@@ -1108,6 +1993,34 @@ int main(int argc, char** argv)
 
     reportTargetHealth(options, options.targetQuads, quads, remesher.holeStats());
 
+    // Symmetry advice, never a veto: on a single-view reconstruction the honest
+    // answer is usually "this mesh is not symmetric", and the caller decides
+    // whether that matters.  A mirror that had to cut a large share of the model
+    // is reported for the same reason - it is the case where the pass does damage.
+    if (options.symmetryAxis > 0) {
+        const AutoRemesher::SymmetryCheck& check = remesher.symmetryCheck();
+        if (check.consideredVertices > 0 && check.matchPct < 80.0) {
+            std::ostringstream message;
+            message.setf(std::ios::fixed);
+            message.precision(1);
+            message << "only " << check.matchPct << "% of the vertices have a mirror partner within "
+                    << options.symmetryTolerance * 100.0 << "% of the bbox diagonal; mirroring this "
+                    << "mesh will cut real geometry";
+            emitWarning(options, "symmetry_mismatch", message.str(),
+                (long long)check.matchedVertices);
+        }
+        const size_t facesBeforeMirror = remesher.remeshedQuads().size();
+        if (remesher.symmetryStats().clippedFaces > 0 && facesBeforeMirror > 0
+            && remesher.symmetryStats().clippedFaces * 50 > facesBeforeMirror) {
+            std::ostringstream message;
+            message << remesher.symmetryStats().clippedFaces
+                    << " face(s) were cut by the mirror plane (more than 2% of the mesh); "
+                    << "--symmetry check measures instead, --symmetry snap moves the seam without cutting";
+            emitWarning(options, "symmetry_clip_heavy", message.str(),
+                (long long)remesher.symmetryStats().clippedFaces);
+        }
+    }
+
     const AutoRemesher::SymmetryStats& symmetry = remesher.symmetryStats();
 
     const double quadsError = (options.targetQuads > 0)
@@ -1116,6 +2029,12 @@ int main(int argc, char** argv)
     const AutoRemesher::TopologyStats& outputStats = remesher.outputStats();
     const AutoRemesher::HoleStats& holes = remesher.holeStats();
     const AutoRemesher::PatchStats& patches = remesher.patchStats();
+
+    // The report prints edge lengths in model units; unit_guess says which unit the
+    // file looks like it is in, and --unit-hint overrides the guess.  Only the
+    // printed units move, never a threshold.
+    const GeometryExtent outputExtent = measureGeometry(remesher.remeshedVertices(), remesher.remeshedQuads());
+    const UnitGuess reportUnit = resolveUnit(options.unitHint, outputExtent.diagonal);
 
     if (options.json) {
         std::ostringstream payload;
@@ -1133,16 +2052,41 @@ int main(int argc, char** argv)
                 << ",\"islands\":" << remesher.islandCount()
                 << ",\"coresBusy\":" << std::setprecision(2) << remesher.coresBusy()
                 << ",\"topology\":{\"input\":" << topologyJson(remesher.inputStats())
-                << ",\"output\":" << topologyJson(outputStats) << "}"
+                << ",\"internal\":" << topologyJson(outputStats)
+                // v1 keeps "output" as an alias of "internal" for one release; the
+                // pair below is what a caller should read from now on.
+                << ",\"output\":" << topologyJson(outputStats)
+                << ",\"exported\":" << (haveExported ? topologyJson(exportedStats) : "null")
+                << ",\"same\":" << ((haveExported && topologiesAgree(outputStats, exportedStats)) ? "true" : "false")
+                << "}"
+                << ",\"quality\":" << qualityJson(quality)
+                << ",\"budget\":" << budgetJson(options, quads, quadsError, outputStats)
+                << ",\"unit_guess\":\"" << reportUnit.name << "\""
+                << ",\"unit_scale_to_mm\":" << reportUnit.scaleToMm
                 << ",\"holes\":{\"filled\":" << holes.filled
                 << ",\"ignored\":" << holes.ignored
                 << ",\"facesAdded\":" << holes.facesAdded << "}"
                 << ",\"patches\":{\"kept\":" << patches.kept
-                << ",\"dropped\":" << patches.dropped << "}"
+                << ",\"dropped\":" << patches.dropped
+                << ",\"welded_vertices\":" << patches.weldedVertices
+                << ",\"remaining_shells\":" << patches.remainingShells
+                << ",\"reason\":\"" << jsonEscape(patches.reason) << "\"}"
                 << ",\"uvs\":" << (uvMode != "none" ? "true" : "false")
                 << ",\"uvMode\":\"" << uvMode << "\""
                 << ",\"uvCorners\":" << uvCorners
+                << ",\"uvStats\":" << (haveUvStats ? uvStatsJson(uvStats, uvMode, remesher.uvChartCount()) : "null")
                 << ",\"symmetry\":{\"axis\":\"" << symmetryAxisName(options.symmetryAxis) << "\""
+                << ",\"mode\":\"" << jsonEscape(options.symmetryMode) << "\""
+                << ",\"keep_positive\":" << (options.symmetryKeepPositive ? "true" : "false")
+                << ",\"match_pct\":" << std::setprecision(3) << remesher.symmetryCheck().matchPct
+                << ",\"max_deviation\":" << std::setprecision(9) << remesher.symmetryCheck().maxDeviation
+                << ",\"mean_deviation\":" << remesher.symmetryCheck().meanDeviation
+                << ",\"plane_estimate\":" << remesher.symmetryCheck().plane
+                << ",\"matched_vertices\":" << remesher.symmetryCheck().matchedVertices
+                << ",\"considered_vertices\":" << remesher.symmetryCheck().consideredVertices
+                << ",\"snapped_verts\":" << remesher.symmetrySnapStats().snappedVertices
+                << ",\"max_snap\":" << remesher.symmetrySnapStats().maxSnap
+                << ",\"snap_tolerance\":" << remesher.symmetrySnapStats().minSnap
                 << ",\"seamVertices\":" << symmetry.seamVertices
                 << ",\"clippedFaces\":" << symmetry.clippedFaces
                 << ",\"mirroredFaces\":" << symmetry.mirroredFaces
@@ -1152,6 +2096,7 @@ int main(int argc, char** argv)
                 << ",\"tolerance\":" << symmetry.tolerance << "}"
                 << ",\"normals\":" << (normals.empty() ? "false" : "true")
                 << ",\"deviation\":" << deviationJson(remesher.deviationStats())
+                << ",\"effective_params\":" << effectiveParamsJson(options)
                 << ",\"phases\":" << phasesJson(remesher.phaseTimings())
                 << "}";
         emitLine(payload.str());

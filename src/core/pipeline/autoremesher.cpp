@@ -1132,6 +1132,7 @@ bool AutoRemesher::remesh()
         const std::vector<Vector3>* meshVertices = &vertices;
         const std::vector<std::vector<size_t>>* meshFaces = &quads;
         bool splitDone = false;
+        m_uvChartCount = 0;
         // The symmetry pass cuts and re-welds the mesh; splitting first would leave
         // the cut row with duplicated vertices that the weld then collapses into
         // open edges.  Symmetry wins, the UVs stay per-vertex.
@@ -1152,6 +1153,7 @@ bool AutoRemesher::remesh()
                 meshVertices = &splitVertices;
                 meshFaces = &splitFaces;
                 splitDone = true;
+                m_uvChartCount = split.chartCount;
             }
         }
 
@@ -1265,17 +1267,61 @@ bool AutoRemesher::remesh()
 
     // Symmetry is applied last, on the merged mesh: the cut and the mirror have to
     // see the whole model, not one island at a time.
+    m_symmetryStats = SymmetryStats();
+    m_symmetryCheck = SymmetryCheck();
+    m_symmetrySnapStats = SymmetrySnapStats();
     if (m_symmetryAxis >= 1 && m_symmetryAxis <= 3) {
-        SymmetryResult mirrored = mirrorSymmetrize(m_remeshedVertices, m_remeshedQuads,
-            m_remeshedFaceUvs, m_remeshedVertexUvs,
-            m_symmetryAxis, m_symmetryPlane, m_symmetryTolerance);
-        m_symmetryStats = mirrored.stats;
-        m_remeshedVertices = std::move(mirrored.vertices);
-        m_remeshedQuads = std::move(mirrored.faces);
-        m_remeshedFaceUvs = std::move(mirrored.faceUvs);
-        m_remeshedVertexUvs = std::move(mirrored.vertexUvs);
-    } else {
-        m_symmetryStats = SymmetryStats();
+        // setSymmetryTolerance is a fraction of the model size (it is what the
+        // mirror pass has always taken); the measuring and snapping entry points
+        // work in model units, so the scale is applied exactly once here.
+        Vector3 extentMinimum;
+        Vector3 extentMaximum;
+        if (!m_remeshedVertices.empty()) {
+            extentMinimum = m_remeshedVertices[0];
+            extentMaximum = extentMinimum;
+            for (const auto& vertex : m_remeshedVertices) {
+                for (int i = 0; i < 3; ++i) {
+                    extentMinimum[i] = std::min(extentMinimum[i], vertex[i]);
+                    extentMaximum[i] = std::max(extentMaximum[i], vertex[i]);
+                }
+            }
+        }
+        const double diagonal = (extentMaximum - extentMinimum).length();
+        const double tolerance = std::max(1e-12,
+            m_symmetryTolerance * (diagonal > 0.0 ? diagonal : 1.0));
+        // Measured in every mode, not just check: a mirror on a mesh that has no
+        // mirror partner is the case worth warning about, and the caller can only
+        // warn if the number is there.
+        m_symmetryCheck = evaluateSymmetry(m_remeshedVertices, m_remeshedQuads,
+            m_symmetryAxis, m_symmetryPlane, !m_symmetryPlaneKnown, tolerance);
+        if (1 == m_symmetryMode) {
+            m_symmetryStats.axis = m_symmetryAxis;
+            m_symmetryStats.plane = m_symmetryCheck.plane;
+            m_symmetryStats.tolerance = tolerance;
+            m_symmetryStats.verticesBefore = m_remeshedVertices.size();
+            m_symmetryStats.verticesAfter = m_remeshedVertices.size();
+        } else if (2 == m_symmetryMode) {
+            const double plane = m_symmetryPlaneKnown ? m_symmetryPlane : m_symmetryCheck.plane;
+            m_symmetrySnapStats = snapToPlane(&m_remeshedVertices, m_symmetryAxis, plane, tolerance);
+            m_symmetryStats.axis = m_symmetryAxis;
+            m_symmetryStats.plane = plane;
+            m_symmetryStats.tolerance = tolerance;
+            m_symmetryStats.verticesBefore = m_remeshedVertices.size();
+            m_symmetryStats.verticesAfter = m_remeshedVertices.size();
+            m_symmetryStats.seamVertices = m_symmetrySnapStats.snappedVertices;
+        } else {
+            SymmetryResult mirrored = mirrorHalf(m_remeshedVertices, m_remeshedQuads,
+                m_remeshedFaceUvs, m_remeshedVertexUvs,
+                m_symmetryAxis, m_symmetryPlane, m_symmetryTolerance, m_symmetryKeepPositive);
+            // The check above measured the mesh as it arrived, which is what the
+            // "was this symmetric enough to mirror" question is about; the mirror
+            // stats describe what the pass then did to it.
+            m_symmetryStats = mirrored.stats;
+            m_remeshedVertices = std::move(mirrored.vertices);
+            m_remeshedQuads = std::move(mirrored.faces);
+            m_remeshedFaceUvs = std::move(mirrored.faceUvs);
+            m_remeshedVertexUvs = std::move(mirrored.vertexUvs);
+        }
     }
 
     m_deviation = DeviationStats();
@@ -1297,8 +1343,41 @@ bool AutoRemesher::remesh()
         m_holeStats.facesAdded += stats.holeFacesAdded;
         m_patchStats.kept += stats.patchesKept;
         m_patchStats.dropped += stats.patchesDropped;
+        m_patchStats.weldedVertices += stats.weldedVertices;
     }
     m_outputStats = analyzeTopology(m_remeshedVertices, m_remeshedQuads);
+
+    // Shells are the number a modelling workflow watches, so say whether the count
+    // is the design or a weld that did not close.  A weld that ran and still left
+    // more than one shell means the boundary vertices are further apart than the
+    // position tolerance, which is a fact about the extraction, not about intent.
+    m_patchStats.remainingShells = m_outputStats.components;
+    m_patchStats.reason.clear();
+    if (m_patchStats.remainingShells > 2 && m_weldPatches) {
+        m_patchStats.reason = (m_holeStats.ignored > 0) ? "open_holes" : "gap_exceeds_tolerance";
+    } else if (m_patchStats.remainingShells > 2 && !m_weldPatches) {
+        m_patchStats.reason = "no_weld_requested";
+    }
+
+    // Quality needs vertex positions, which the analysis above deliberately does
+    // not touch; it is the block a reviewer reads to decide "can this be modelled
+    // on" and it used to require a second tool.
+    {
+        Vector3 extentMinimum;
+        Vector3 extentMaximum;
+        if (!m_remeshedVertices.empty()) {
+            extentMinimum = m_remeshedVertices[0];
+            extentMaximum = extentMinimum;
+            for (const auto& vertex : m_remeshedVertices) {
+                for (int i = 0; i < 3; ++i) {
+                    extentMinimum[i] = std::min(extentMinimum[i], vertex[i]);
+                    extentMaximum[i] = std::max(extentMaximum[i], vertex[i]);
+                }
+            }
+        }
+        m_qualityStats = collectQuality(m_remeshedVertices, m_remeshedQuads,
+            (extentMaximum - extentMinimum).length());
+    }
 
     auto t_mergeEnd = std::chrono::high_resolution_clock::now();
 

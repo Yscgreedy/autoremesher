@@ -47,6 +47,7 @@ struct SymmetryResult {
     std::vector<Vector3> vertices;
     std::vector<std::vector<size_t>> faces;
     std::vector<std::vector<Vector2>> faceUvs;
+    std::vector<Vector2> vertexUvs;
     SymmetryStats stats;
 };
 
@@ -55,9 +56,12 @@ struct SymmetryResult {
 // seam.  UVs are carried through the cut (interpolated for the corners the cut
 // creates) and mirrored with their faces; pass an empty faceUvs to skip them.
 // A face lying entirely on the plane is dropped: it has no thickness to mirror.
+// vertexUvs is per vertex (same order as vertices) and may be empty; faceUvs is
+// per face corner and may be empty.  Both, either or neither may be supplied.
 SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
     const std::vector<std::vector<Vector2>>& faceUvs,
+    const std::vector<Vector2>& vertexUvs,
     int axis, double plane, double tolerance);
 
 }

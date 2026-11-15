@@ -29,6 +29,13 @@ Unreleased
   the request by more than 10%
 - The GUI passes `--exact-target-quads` by default, so a target slider in the UI
   lands where it says
+- UV v2: the extractor keeps the cover's own UV per cross point and carries it through
+  every cleanup pass, so QuadExtractor exposes `remeshedVertexUvs()`. `--uv-mode
+  corner|vertex|hybrid` picks the channel: corner (default, unchanged), vertex
+  (continuous across faces that share a vertex), hybrid (vertex + per-corner fallback
+  where the two channels disagree on area). Measured: sphere 12k corner 0 degenerate
+  UV faces / p99 3.7, vertex 9 / 62, hybrid 2 / 3.4; multi_part corner 38 degenerate,
+  vertex 2577 - which is why corner stays the default
 - Export UVs and normals: the output OBJ now carries `vt` (one per face corner) and
   `vn` (smooth, area weighted). The UVs are the island's own parameterization carried
   onto the quads through the chart under each face's centroid (`UvTransfer`, uniform

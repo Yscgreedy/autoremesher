@@ -20,6 +20,7 @@
  *  SOFTWARE.
  */
 #include <AutoRemesher/MeshSymmetry>
+#include <core/base/logging.h>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -30,6 +31,7 @@ namespace AutoRemesher {
 SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
     const std::vector<std::vector<size_t>>& sourceFaces,
     const std::vector<std::vector<Vector2>>& sourceFaceUvs,
+    const std::vector<Vector2>& vertexUvs,
     int axisValue, double plane, double tolerance)
 {
     SymmetryResult result;
@@ -57,9 +59,11 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
     stats.tolerance = seamTolerance;
 
     const bool keepUvs = sourceFaceUvs.size() == sourceFaces.size();
+    const bool keepVertexUvs = !vertexUvs.empty() && vertexUvs.size() == sourceVertices.size();
     std::vector<Vector3> vertices;
     std::vector<std::vector<size_t>> faces;
     std::vector<std::vector<Vector2>> faceUvs;
+    std::vector<Vector2> keptVertexUvs;
     std::vector<size_t> originalToKept(sourceVertices.size(), (size_t)-1);
     const size_t noIndex = (size_t)-1;
 
@@ -68,6 +72,8 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
             return originalToKept[index];
         const size_t kept = vertices.size();
         vertices.push_back(sourceVertices[index]);
+        if (keepVertexUvs)
+            keptVertexUvs.push_back(vertexUvs[index]);
         originalToKept[index] = kept;
         return kept;
     };
@@ -99,17 +105,23 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
             for (const size_t corner : face)
                 keptFace.push_back(keepVertex(corner));
             faces.push_back(std::move(keptFace));
-            if (keepUvs)
-                faceUvs.push_back(sourceFaceUvs[faceIndex]);
+            if (keepUvs) {
+                if (sourceFaceUvs[faceIndex].size() == face.size())
+                    faceUvs.push_back(sourceFaceUvs[faceIndex]);
+                else
+                    faceUvs.push_back(std::vector<Vector2>());
+            }
             continue;
         }
         if (!anyPositive)
             continue;
         // Sutherland-Hodgman against coordinate >= 0, carrying the face's own UV
         // so a corner created by the cut still samples the chart of that face.
-        const std::vector<Vector2> sourceUvs = keepUvs ? sourceFaceUvs[faceIndex] : std::vector<Vector2>();
+        const bool faceHasUvs = keepUvs && sourceFaceUvs[faceIndex].size() == face.size();
+        const std::vector<Vector2> sourceUvs = faceHasUvs ? sourceFaceUvs[faceIndex] : std::vector<Vector2>();
         std::vector<Vector3> clipped;
         std::vector<Vector2> clippedUvs;
+        std::vector<Vector2> clippedPointUvs;
         // Which original vertex each clipped corner came from, or noIndex for a
         // point the cut created.  Reusing the original index is what keeps the
         // clipped face stitched to its neighbours: a fresh copy of an unmoved
@@ -123,8 +135,10 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
             if (di >= 0.0) {
                 clipped.push_back(sourceVertices[face[i]]);
                 clippedSource.push_back(face[i]);
-                if (keepUvs)
+                if (faceHasUvs)
                     clippedUvs.push_back(sourceUvs[i]);
+                if (keepVertexUvs)
+                    clippedPointUvs.push_back(vertexUvs[face[i]]);
             }
             if ((di > 0.0 && dj < 0.0) || (di < 0.0 && dj > 0.0)) {
                 const double ratio = di / (di - dj);
@@ -132,8 +146,10 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
                     + sourceVertices[face[j]] * ratio;
                 clipped.push_back(snapToSeam(point));
                 clippedSource.push_back(noIndex);
-                if (keepUvs)
+                if (faceHasUvs)
                     clippedUvs.push_back(sourceUvs[i] * (1.0 - ratio) + sourceUvs[j] * ratio);
+                if (keepVertexUvs)
+                    clippedPointUvs.push_back(vertexUvs[face[i]] * (1.0 - ratio) + vertexUvs[face[j]] * ratio);
             }
         }
         if (clipped.size() < 3)
@@ -148,10 +164,12 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
             }
             keptFace.push_back(vertices.size());
             vertices.push_back(clipped[i]);
+            if (keepVertexUvs)
+                keptVertexUvs.push_back(clippedPointUvs[i]);
         }
         faces.push_back(std::move(keptFace));
         if (keepUvs)
-            faceUvs.push_back(std::move(clippedUvs));
+            faceUvs.push_back(faceHasUvs ? std::move(clippedUvs) : std::vector<Vector2>());
     }
 
     // Everything on the plane snaps exactly onto it.
@@ -255,6 +273,21 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
             }
         }
         vertices.swap(compacted);
+        if (keepVertexUvs) {
+            // The compaction renumbered the vertices; the UVs have to follow, or
+            // the array stops describing the mesh it is attached to.  Note the
+            // swap above: the new count is vertices.size(), not compacted.size().
+            std::vector<size_t> inverse(vertices.size(), noIndex);
+            for (size_t i = 0; i < compact.size(); ++i) {
+                if (compact[i] != noIndex)
+                    inverse[compact[i]] = i;
+            }
+            std::vector<Vector2> compactedUvs;
+            compactedUvs.reserve(vertices.size());
+            for (size_t i = 0; i < vertices.size(); ++i)
+                compactedUvs.push_back(inverse[i] != noIndex ? keptVertexUvs[inverse[i]] : Vector2());
+            keptVertexUvs.swap(compactedUvs);
+        }
     }
 
     onPlane.assign(vertices.size(), 0);
@@ -273,7 +306,10 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
         Vector3 mirrored = vertices[i];
         mirrored[axis] = 2.0 * plane - mirrored[axis];
         mirrorIndex[i] = vertices.size();
+        const Vector2 mirroredUv = keepVertexUvs ? keptVertexUvs[i] : Vector2();
         vertices.push_back(mirrored);
+        if (keepVertexUvs)
+            keptVertexUvs.push_back(mirroredUv);
     }
 
     const size_t keptFaceCount = faces.size();
@@ -294,8 +330,12 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
             mirroredFace.push_back(mirrorIndex[*it]);
         faces.push_back(std::move(mirroredFace));
         if (keepUvs) {
-            std::vector<Vector2> mirroredUvs(faceUvs[faceIndex].rbegin(), faceUvs[faceIndex].rend());
-            faceUvs.push_back(std::move(mirroredUvs));
+            if (faceUvs[faceIndex].empty()) {
+                faceUvs.push_back(std::vector<Vector2>());
+            } else {
+                std::vector<Vector2> mirroredUvs(faceUvs[faceIndex].rbegin(), faceUvs[faceIndex].rend());
+                faceUvs.push_back(std::move(mirroredUvs));
+            }
         }
         ++stats.mirroredFaces;
     }
@@ -303,6 +343,11 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
     result.vertices = std::move(vertices);
     result.faces = std::move(faces);
     result.faceUvs = std::move(faceUvs);
+    if (keepVertexUvs && keptVertexUvs.size() == result.vertices.size())
+        result.vertexUvs = std::move(keptVertexUvs);
+    if (keepVertexUvs && keptVertexUvs.size() != result.vertices.size())
+        Log::write(Log::Debug, "symmetry uv bookkeeping lost: " + std::to_string(keptVertexUvs.size())
+                + " uv(s) for " + std::to_string(result.vertices.size()) + " vertices\n");
     for (size_t i = 0; i < result.vertices.size(); ++i) {
         if (result.vertices[i][axis] == plane)
             ++stats.seamVertices;

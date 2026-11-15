@@ -21,7 +21,7 @@
 | --model-type 死开关 | 已修 | 改成真正的 preset 表（organic/hard-surface），显式传的旋钮仍优先；`--preset` 为新名，`--model-type` 为别名；GUI 下拉框现在会把四个滑块拨到同一张表 |
 | 回归护栏 | 已加 | `tools/smoke_cli.py`（JSON 契约 + quiet 静默 + 目标数 ≤15%），已接入 gates.yml；`--legacy-target-quads` 可复现旧 MD5（F7DC332D…） |
 
-P1 进展：**UV/vn 导出**、**pole 分布 + edge-loop 走态度量**（tools/metrics，poles/簇/最近距离、环转向角与横向二面角）、**对称**（`--symmetry x|y|z` + `--symmetry-plane`：平面裁切 + 中缝焊接 + 正半镜像，构造性对称；实测 0 unmatched、0 开边、0 非流形；平面不可在原点时用偏移参数）均已落地。仍未做：单岛并行（P2）、偏差进核心/GUI（P2）、UV v2 逐角映射（消 seam 断口）。
+P1 进展：**UV/vn 导出**、**pole 分布 + edge-loop 走态度量**（tools/metrics，poles/簇/最近距离、环转向角与横向二面角）、**对称**（`--symmetry x|y|z` + `--symmetry-plane`：平面裁切 + 中缝焊接 + 正半镜像，构造性对称；实测 0 unmatched、0 开边、0 非流形；平面不可在原点时用偏移参数）均已落地。UV v2 已落地：extractor 全程保留每顶点 UV（`remeshedVertexUvs()`），CLI `--uv-mode corner|vertex|hybrid` 可选通道，实测见 README（sphere：corner 0 退化/3.7，vertex 9/62，hybrid 2/3.4；multi_part vertex 明显更差，故默认仍 corner）。仍未做：单岛并行（P2）、偏差进核心/GUI（P2）。
 
 ## 一、"顺的地方"核对
 

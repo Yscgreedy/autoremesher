@@ -1026,8 +1026,27 @@ bool AutoRemesher::remesh()
     };
 
     m_remeshedFaceUvs.clear();
+    m_remeshedVertexUvs.clear();
     double uvCursor = 0.0;
     bool uvsComplete = m_exportUvs;
+
+    // Both UV channels are produced: the extractor's per-vertex UVs (continuous
+    // across any face that shares a vertex) and the per-face chart transfer
+    // (correct where corners come from different charts of the cover).  The writer
+    // picks per face, so a seam only exists where the cover really has one.
+    bool vertexUvsPossible = m_exportUvs;
+    if (vertexUvsPossible) {
+        for (const auto& thread : parameterizationThreads) {
+            if (nullptr == thread.remesher || thread.remesher->remeshedQuads().empty())
+                continue;
+            const std::vector<Vector2>& vertexUvs = thread.remesher->remeshedVertexUvs();
+            if (vertexUvs.empty() || vertexUvs.size() != thread.remesher->remeshedVertices().size()) {
+                vertexUvsPossible = false;
+                break;
+            }
+        }
+    }
+    bool vertexUvsComplete = vertexUvsPossible;
 
     for (size_t i = 0; i < parameterizationThreads.size(); ++i) {
         auto& thread = parameterizationThreads[i];
@@ -1038,10 +1057,13 @@ bool AutoRemesher::remesh()
             continue;
         const auto& vertices = thread.remesher->remeshedVertices();
 
-        // Carry the island's parameterization onto the quads it just produced.
-        // One chart per face: the cover's seam runs between faces, so a face
-        // asks for the chart under its centroid and maps its corners through it.
-        // Mapping each vertex on its own instead collapses every seam face.
+        std::vector<Vector2> islandVertexUvs;
+        if (vertexUvsPossible) {
+            islandVertexUvs = thread.remesher->remeshedVertexUvs();
+            if (islandVertexUvs.size() != vertices.size())
+                vertexUvsComplete = false;
+        }
+
         std::vector<std::vector<Vector2>> islandFaceUvs;
         bool islandUvsOk = false;
         if (m_exportUvs && !thread.capturedUvs.empty()
@@ -1077,9 +1099,9 @@ bool AutoRemesher::remesh()
                     }
                     if (!islandUvsOk)
                         break;
-                    // A degenerate chart (a collapsed or zero-area triangle in
-                    // the parameterization) would collapse the face in UV space,
-                    // so that face falls back to its own planar frame instead.
+                    // A degenerate chart (a collapsed or zero-area triangle in the
+                    // parameterization) would collapse the face in UV space, so
+                    // that face falls back to its own planar frame.
                     if (!(std::fabs(polygonUvArea(cornerUvs)) > 0.0)) {
                         cornerUvs = planarFaceUvs(vertices, quad);
                         if (cornerUvs.empty()) {
@@ -1091,34 +1113,49 @@ bool AutoRemesher::remesh()
                 }
             }
         }
-        if (islandUvsOk && islandFaceUvs.size() == quads.size() && !islandFaceUvs.empty()) {
-            // Islands get their own stripe in UV space: their cover solves are
-            // independent, so laying them out as they came would overlap.
-            double minU = islandFaceUvs[0][0].x();
-            double maxU = minU;
-            double minV = islandFaceUvs[0][0].y();
-            double maxV = minV;
-            for (const auto& faceUvs : islandFaceUvs) {
-                for (const auto& uv : faceUvs) {
-                    minU = std::min(minU, uv.x());
-                    maxU = std::max(maxU, uv.x());
-                    minV = std::min(minV, uv.y());
-                    maxV = std::max(maxV, uv.y());
-                }
+
+        // One stripe per island in UV space: their cover solves are independent.
+        double minU = 0.0;
+        double maxU = 0.0;
+        double minV = 0.0;
+        double maxV = 0.0;
+        bool haveUv = false;
+        const auto consider = [&](const Vector2& uv) {
+            minU = haveUv ? std::min(minU, uv.x()) : uv.x();
+            maxU = haveUv ? std::max(maxU, uv.x()) : uv.x();
+            minV = haveUv ? std::min(minV, uv.y()) : uv.y();
+            maxV = haveUv ? std::max(maxV, uv.y()) : uv.y();
+            haveUv = true;
+        };
+        if (vertexUvsComplete) {
+            for (const auto& uv : islandVertexUvs)
+                consider(uv);
+        }
+        if (islandUvsOk) {
+            for (const auto& faceUvs : islandFaceUvs)
+                for (const auto& uv : faceUvs)
+                    consider(uv);
+        }
+        double shiftU = 0.0;
+        double shiftV = 0.0;
+        if (haveUv) {
+            shiftU = uvCursor - minU;
+            shiftV = -minV;
+            uvCursor += (maxU - minU) * 1.1 + 1e-6;
+        }
+        if (vertexUvsComplete) {
+            for (auto& uv : islandVertexUvs) {
+                uv.setX(uv.x() + shiftU);
+                uv.setY(uv.y() + shiftV);
             }
-            const double shiftU = uvCursor - minU;
-            const double shiftV = -minV;
+        }
+        if (islandUvsOk) {
             for (auto& faceUvs : islandFaceUvs) {
                 for (auto& uv : faceUvs) {
                     uv.setX(uv.x() + shiftU);
                     uv.setY(uv.y() + shiftV);
                 }
             }
-            uvCursor += (maxU - minU) * 1.1 + 1e-6;
-        } else if (m_exportUvs) {
-            // One island without a usable mapping makes the whole set suspect,
-            // so the export is all or nothing.
-            uvsComplete = false;
         }
 
         size_t vertexStartIndex = m_remeshedVertices.size();
@@ -1133,38 +1170,55 @@ bool AutoRemesher::remesh()
                 quad.push_back(vertexStartIndex + v);
             m_remeshedQuads.push_back(quad);
         }
+        if (vertexUvsComplete && islandVertexUvs.size() == vertices.size()) {
+            m_remeshedVertexUvs.insert(m_remeshedVertexUvs.end(),
+                islandVertexUvs.begin(), islandVertexUvs.end());
+        }
         if (islandUvsOk && islandFaceUvs.size() == quads.size()) {
             for (const auto& faceUvs : islandFaceUvs)
                 m_remeshedFaceUvs.push_back(faceUvs);
         }
+        if (m_exportUvs && !islandUvsOk)
+            uvsComplete = false;
     }
 
-    if (!uvsComplete || m_remeshedFaceUvs.size() != m_remeshedQuads.size()) {
+    if (!vertexUvsComplete || m_remeshedVertexUvs.size() != m_remeshedVertices.size())
+        m_remeshedVertexUvs.clear();
+
+    if (!uvsComplete || (m_exportUvs && m_remeshedFaceUvs.size() != m_remeshedQuads.size())) {
+        m_remeshedVertexUvs.clear();
         m_remeshedFaceUvs.clear();
-    } else if (!m_remeshedFaceUvs.empty()) {
-        // Normalize into the unit square: a UV scale only means something to a
-        // downstream tool once it is relative.  The aspect ratio is kept, so the
-        // texel density stays proportional to the surface.
-        double minU = m_remeshedFaceUvs[0][0].x();
-        double maxU = minU;
-        double minV = m_remeshedFaceUvs[0][0].y();
-        double maxV = minV;
-        for (const auto& faceUvs : m_remeshedFaceUvs) {
-            for (const auto& uv : faceUvs) {
-                minU = std::min(minU, uv.x());
-                maxU = std::max(maxU, uv.x());
-                minV = std::min(minV, uv.y());
-                maxV = std::max(maxV, uv.y());
-            }
-        }
-        const double extent = std::max(maxU - minU, maxV - minV);
+    } else {
+        // One normalization for both channels, so a face that falls back to the
+        // per-corner chart still lands on the same UV scale as its neighbours.
+        bool haveUv = false;
+        double minU = 0.0;
+        double maxU = 0.0;
+        double minV = 0.0;
+        double maxV = 0.0;
+        const auto consider = [&](const Vector2& uv) {
+            minU = haveUv ? std::min(minU, uv.x()) : uv.x();
+            maxU = haveUv ? std::max(maxU, uv.x()) : uv.x();
+            minV = haveUv ? std::min(minV, uv.y()) : uv.y();
+            maxV = haveUv ? std::max(maxV, uv.y()) : uv.y();
+            haveUv = true;
+        };
+        for (const auto& uv : m_remeshedVertexUvs)
+            consider(uv);
+        for (const auto& faceUvs : m_remeshedFaceUvs)
+            for (const auto& uv : faceUvs)
+                consider(uv);
+        const double extent = haveUv ? std::max(maxU - minU, maxV - minV) : 0.0;
         if (extent > 0.0) {
-            for (auto& faceUvs : m_remeshedFaceUvs) {
-                for (auto& uv : faceUvs) {
-                    uv.setX((uv.x() - minU) / extent);
-                    uv.setY((uv.y() - minV) / extent);
-                }
-            }
+            const auto normalize = [&](Vector2* uv) {
+                uv->setX((uv->x() - minU) / extent);
+                uv->setY((uv->y() - minV) / extent);
+            };
+            for (auto& uv : m_remeshedVertexUvs)
+                normalize(&uv);
+            for (auto& faceUvs : m_remeshedFaceUvs)
+                for (auto& uv : faceUvs)
+                    normalize(&uv);
         }
     }
 
@@ -1172,11 +1226,13 @@ bool AutoRemesher::remesh()
     // see the whole model, not one island at a time.
     if (m_symmetryAxis >= 1 && m_symmetryAxis <= 3) {
         SymmetryResult mirrored = mirrorSymmetrize(m_remeshedVertices, m_remeshedQuads,
-            m_remeshedFaceUvs, m_symmetryAxis, m_symmetryPlane, m_symmetryTolerance);
+            m_remeshedFaceUvs, m_remeshedVertexUvs,
+            m_symmetryAxis, m_symmetryPlane, m_symmetryTolerance);
         m_symmetryStats = mirrored.stats;
         m_remeshedVertices = std::move(mirrored.vertices);
         m_remeshedQuads = std::move(mirrored.faces);
         m_remeshedFaceUvs = std::move(mirrored.faceUvs);
+        m_remeshedVertexUvs = std::move(mirrored.vertexUvs);
     } else {
         m_symmetryStats = SymmetryStats();
     }

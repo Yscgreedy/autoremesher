@@ -14,6 +14,7 @@ autoremesher --input MODEL.obj --output OUT.obj --target-quads 20000 [options]
 |---|---|---|
 | `-i, --input PATH` | required | input OBJ (triangles and/or quads; polygons are triangulated) |
 | `-o, --output PATH` | `<input-stem>_remeshed.obj` | output OBJ: quad faces with `vt` per corner and `vn` per vertex |
+| `--uv-mode corner\|vertex\|hybrid` | corner | which UV channel to write (see below) |
 | `--no-uv` | off | skip the `vt` lines |
 | `--no-normals` | off | skip the `vn` lines |
 | `--symmetry x\|y\|z` | off | cut at that plane, weld the seam, mirror the positive half |
@@ -79,8 +80,10 @@ Rules:
   `nonQuads`, `triangles`), so an existing reader keeps working; the nested blocks are
   additive. `holes.ignored` counts boundary loops longer than 65 edges that graded
   filling refuses to close without `--projected-caps`.
-- `uvs` is true only when every face got a UV; `uvCorners` is the number of `vt`
-  lines written (one per face corner, not per vertex). `normals` reports the `vn` lines.
+- `uvs` is true only when every face got a UV; `uvMode` says which channel was used
+  (`corner` = one vt per face corner, `vertex` = one per vertex, `hybrid` = vertex
+  plus corners for the faces the vertex UVs would stretch); `uvCorners` is the number
+  of `vt` lines written. `normals` reports the `vn` lines.
 - `phases[].accumulated` marks per-island sums: `accumulated / wall clock` is the
   parallelism the phase reached, which is what `coresBusy` reports for the whole run.
 - Human diagnostics never go to stdout when `--json` is set (stderr only).

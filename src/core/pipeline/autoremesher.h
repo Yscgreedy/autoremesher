@@ -188,6 +188,14 @@ public:
         m_coverAttempts = attempts;
     }
 
+    // 0 keeps the full 3F curl correction, 1 pins one scale unknown so the solve
+    // is 2F: about three times faster on a 20k quad target, at the price of a worse
+    // worst-case deviation.  See QuadParameterizer::applyCurlCorrection.
+    void setCurlMode(int mode)
+    {
+        m_curlMode = mode;
+    }
+
     const std::vector<Vector3>& remeshedVertices()
     {
         return m_remeshedVertices;
@@ -548,6 +556,7 @@ private:
     bool m_localRemesh = false;
     double m_maximumAspect = 0.0;
     int m_coverAttempts = 0;
+    int m_curlMode = 0;
     TopologyStats m_inputStats;
     TopologyStats m_outputStats;
     bool m_inputAnalyzed = false;

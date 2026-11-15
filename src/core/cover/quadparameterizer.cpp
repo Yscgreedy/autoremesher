@@ -284,7 +284,7 @@ namespace {
         const std::vector<int>& rotation, const std::vector<signed char>& cornerConstraints,
         const std::vector<double>* faceScaling, double scale, double regularization,
         std::vector<double>* scalingU, std::vector<double>* scalingV,
-        std::vector<Vector3>* field)
+        std::vector<Vector3>* field, bool pinAcrossScale)
     {
         const size_t faceCount = mesh.faceCount();
         const bool hasFaceScaling = faceScaling && faceScaling->size() == faceCount;
@@ -347,13 +347,23 @@ namespace {
         }
         if (0 == edgeCount)
             return;
+        // Pinning one scale unknown instead of regularizing it turns the 3F system
+        // into 2F, and the factor dominates the parameterization's cost.  Measured
+        // on the shoe (20k target): curl 1411 -> 438 ms, mean deviation unchanged,
+        // poles 9.68 -> 9.43, aspect max 119 -> 19, at the price of a worse
+        // worst-case deviation (1.44 -> 2.76 mm on a 260 mm model).  On the smaller
+        // body model the same switch saves 0.2 s and moves nothing much, so it is a
+        // choice for the caller rather than a new default.
         for (size_t f = 0; f < faceCount; ++f) {
             if (anchored[f])
                 system.addConstraint({ { 3 * f, 1.0 } }, 0.0);
             else
                 system.addEnergy({ { 3 * f, 1.0 } }, 0.0, regularization);
             system.addEnergy({ { 3 * f + 1, 1.0 } }, 0.0, regularization);
-            system.addEnergy({ { 3 * f + 2, 1.0 } }, 0.0, regularization);
+            if (pinAcrossScale)
+                system.addConstraint({ { 3 * f + 2, 1.0 } }, 0.0);
+            else
+                system.addEnergy({ { 3 * f + 2, 1.0 } }, 0.0, regularization);
         }
 
         std::vector<double> correction;
@@ -727,8 +737,10 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     const ProgressHandler* progressHandler,
     CoverBudgetReport* budgetReport,
     double extractionEfficiency,
-    int maximumCoverAttemptsRequested)
+    int maximumCoverAttemptsRequested,
+    int curlMode)
 {
+    const bool pinAcrossScale = 1 == curlMode;
     const auto report = [progressHandler](float fraction, const char* name) {
         if (nullptr != progressHandler && *progressHandler)
             (*progressHandler)(fraction, name);
@@ -831,7 +843,8 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
 
     report(0.20f, "Correcting field curl");
     applyCurlCorrection(mesh, normals, rotation, cornerConstraints,
-        faceScaling, scale, 1e-4, &activeScalingU, &activeScalingV, &result->field);
+        faceScaling, scale, 1e-4, &activeScalingU, &activeScalingV, &result->field,
+        pinAcrossScale);
     const std::vector<char> seam = computeSeam(mesh, rotation);
 
     if (nullptr != getenv("AR_DIAG_CHARTS")) {

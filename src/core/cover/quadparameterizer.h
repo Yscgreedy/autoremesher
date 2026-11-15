@@ -100,7 +100,11 @@ public:
         // 0 keeps the budget loop's own policy; 1 spends a single cover solve per
         // island, which is the speed switch a caller picks when it would rather
         // have the wall clock than the last few percent of count accuracy.
-        int maximumCoverAttempts = 0);
+        int maximumCoverAttempts = 0,
+        // 0 regularizes both scale unknowns, 1 pins the across-scale one and turns
+        // the 3F curl system into 2F (measured 3x faster on the shoe, see
+        // applyCurlCorrection for what it costs in worst-case deviation).
+        int curlMode = 0);
 
     // Instance form of the solve, with the budget knobs and the trace kept on the
     // object.  Named apart because the static form above has to keep its exact

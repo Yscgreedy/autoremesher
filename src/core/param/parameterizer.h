@@ -99,6 +99,13 @@ public:
         m_maximumCoverAttempts = attempts;
     }
 
+    // 0 = regularize both curl scale unknowns, 1 = pin the across-scale one so the
+    // system is 2F instead of 3F.
+    void setCurlMode(int mode)
+    {
+        m_curlMode = mode;
+    }
+
     void setSingularitySimplification(bool simplify)
     {
         m_singularitySimplification = simplify;
@@ -133,6 +140,7 @@ private:
     bool m_singularitySimplification = true;
     size_t m_targetQuadCount = 0;
     int m_maximumCoverAttempts = 0;
+    int m_curlMode = 0;
     size_t m_maximumSingularityPairDistance = 6;
     ProgressHandler m_progressHandler;
 

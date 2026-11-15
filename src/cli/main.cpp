@@ -161,6 +161,8 @@ struct Options {
     bool uvPacking = true;
     // 0 = the budget loop's own policy; 1 = one cover solve per island.
     int coverAttempts = 0;
+    // 0 = full 3F curl correction, 1 = 2F (faster, worse worst-case deviation).
+    int curlMode = 0;
     // Degenerate cleanup: zero length edges, degenerate and duplicate faces.
     bool cleanDegenerate = true;
     // The consumer contract asks for quad_aspect_max <= --max-aspect with 20 as
@@ -277,6 +279,11 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "      --clean-degenerate      weld zero length edges and drop degenerate or\n"
                      "                              duplicate faces at the end of extraction (default)\n"
                      "      --no-clean-degenerate   keep whatever the topology passes produced\n"
+                     "      --cover-attempts N      how many cover solves the budget loop may spend\n"
+                     "                              (0 = its own policy, 1 = one solve per island)\n"
+                     "      --curl-mode M           full | angle-v: angle-v pins one curl scale unknown\n"
+                     "                              and solves 2F instead of 3F (about 3x faster on a\n"
+                     "                              20k target, larger worst-case deviation)\n"
                      "      --max-aspect F          collapse sliver quads whose max/min edge ratio\n"
                      "                              exceeds F (default 20; 0 keeps every sliver)\n"
                      "      --threads N             pin the TBB worker count (0 = all cores)\n"
@@ -692,6 +699,17 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->maxAspect = number();
         } else if (arg == "--cover-attempts") {
             options->coverAttempts = static_cast<int>(number());
+        } else if (arg == "--curl-mode") {
+            const std::string mode = value();
+            if (mode == "full")
+                options->curlMode = 0;
+            else if (mode == "angle-v" || mode == "2f" || mode == "2F")
+                options->curlMode = 1;
+            else {
+                fprintf(stderr, "unknown curl mode '%s' (full|angle-v)\n", mode.c_str());
+                *exitCode = 1;
+                return false;
+            }
         } else if (arg == "--symmetry-tolerance") {
             options->symmetryTolerance = number();
         } else if (arg == "--deviation") {
@@ -1834,6 +1852,7 @@ int main(int argc, char** argv)
     remesher.setLocalRemesh(options.localRemesh);
     remesher.setMaximumAspect(options.maxAspect);
     remesher.setCoverAttempts(options.coverAttempts);
+    remesher.setCurlMode(options.curlMode);
     remesher.setExportUvs(options.writeUvs);
     // A per-vertex UV channel can only describe charts that do not share vertices,
     // so packing a vertex-mode layout needs the mesh cut at the chart seams.  Without

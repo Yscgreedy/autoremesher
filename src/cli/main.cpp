@@ -161,7 +161,9 @@ struct Options {
     bool uvPacking = true;
     // Degenerate cleanup: zero length edges, degenerate and duplicate faces.
     bool cleanDegenerate = true;
-    double maxAspect = 0.0; // 0 = report only, do not collapse anything
+    // The consumer contract asks for quad_aspect_max <= --max-aspect with 20 as
+    // the default, so 20 is the default here; --max-aspect 0 keeps every sliver.
+    double maxAspect = 20.0;
     int logLevel = 1; // 0 = silent, 1 = normal, 2 = debug (core Log::Level order)
     bool json = false;
     bool progress = false;
@@ -273,8 +275,8 @@ const char* kUsage = "AutoRemesher " AR_VERSION " - automatic quad remeshing (he
                      "      --clean-degenerate      weld zero length edges and drop degenerate or\n"
                      "                              duplicate faces at the end of extraction (default)\n"
                      "      --no-clean-degenerate   keep whatever the topology passes produced\n"
-                     "      --max-aspect F          collapse quads whose max/min edge ratio exceeds F\n"
-                     "                              (default 0 = only the degenerate ones are removed)\n"
+                     "      --max-aspect F          collapse sliver quads whose max/min edge ratio\n"
+                     "                              exceeds F (default 20; 0 keeps every sliver)\n"
                      "      --threads N             pin the TBB worker count (0 = all cores)\n"
                      "\n"
                      "Reporting:\n"

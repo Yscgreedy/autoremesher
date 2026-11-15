@@ -82,6 +82,14 @@ public:
         size_t boundaryLoops = 0; // output boundary loops, if cheap to compute
         size_t openEdges = 0; // output open (boundary) edges
         size_t nonManifoldEdges = 0; // output non-manifold edges
+        // The final validate pass.  The cleanup passes above reconnect faces one
+        // defect at a time and can leave a face that already exists; a caller
+        // that counts faces per edge reads that as a non-manifold edge, so the
+        // counts are worth reporting rather than silently fixing.
+        size_t duplicateFacesRemoved = 0;
+        size_t degenerateFacesRemoved = 0;
+        size_t weldedVertices = 0;
+        size_t nonManifoldFacesRemoved = 0;
     };
 
     // Statistics of the mesh extract() produced; updated by extract() itself, so
@@ -155,6 +163,14 @@ public:
     // Local topology optimisation: merges triangle pairs into quads and splits
     // the larger faces, judged by one global energy (face size + vertex valence)
     // instead of the per pass heuristics.
+    // The validate pass is on by default: it is what keeps the written file and
+    // the reported numbers describing the same mesh.  Turning it off restores the
+    // pre-1.3 behaviour for an A/B run.
+    void setCleanDegenerate(bool enabled)
+    {
+        m_cleanDegenerate = enabled;
+    }
+
     void setLocalRemesh(bool enabled)
     {
         m_localRemesh = enabled;
@@ -212,6 +228,7 @@ private:
     bool m_gradedHoleFilling = false;
     bool m_projectedHoleCaps = false;
     bool m_localRemesh = false;
+    bool m_cleanDegenerate = true;
     // Filled by extract() and its hole/patch passes; see ExtractionStats.
     ExtractionStats m_extractionStats;
     ProgressHandler m_progressHandler;
@@ -301,6 +318,11 @@ private:
     // inside its round loop instead of running silently to completion.
     void mergeSharedFiveEdgeFaces(const ProgressHandler* progressHandler = nullptr);
     bool removeNonManifoldFaces();
+    // Last thing extract() does: weld zero length edges, drop degenerate and
+    // duplicate faces, and remove whatever still makes an edge shared by three
+    // faces.  Everything downstream (statistics, the OBJ writer, the caller's
+    // own measurement) then sees the same mesh.
+    void validateRemeshedMesh();
     void rebuildHalfEdges();
     // One hole really got its faces appended: counted, and the faces it added go
     // into the running total.  A pass that only re-walks a loop an earlier pass

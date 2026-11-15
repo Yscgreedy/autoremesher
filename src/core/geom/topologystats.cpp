@@ -20,6 +20,8 @@
  *  SOFTWARE.
  */
 #include <AutoRemesher/TopologyStats>
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <numeric>
 #include <unordered_map>
@@ -192,7 +194,215 @@ TopologyStats analyzeTopology(const std::vector<Vector3>& vertices,
         roots.insert(findRoot(faceIndex));
     }
     stats.components = roots.size();
+    // Filled last so that both derived counters see the final boundary and
+    // non-manifold counts no matter how the passes above are reordered later.
+    stats.edgesWithMoreThanTwoFaces = stats.nonManifoldEdges;
+    stats.nonManifoldEdgesBlender = stats.boundaryEdges + stats.edgesWithMoreThanTwoFaces;
     return stats;
+}
+
+namespace {
+
+    typedef std::pair<size_t, size_t> QualityEdgeKey;
+
+    struct QualityEdgeKeyHash {
+        size_t operator()(const QualityEdgeKey& key) const
+        {
+            const size_t first = std::hash<size_t>()(key.first);
+            const size_t second = std::hash<size_t>()(key.second);
+            return first ^ (second + 0x9e3779b9ULL + (first << 6) + (first >> 2));
+        }
+    };
+
+    // Order statistic, not an interpolation: (size_t)(p * n) clipped to the last
+    // element.  A consumer comparing these against another tool's percentiles can
+    // point at a value that exists in the mesh; an interpolated one exists only
+    // inside the report and is a fresh argument every time the two tools differ.
+    double qualityQuantile(const std::vector<double>& sortedValues, double fraction)
+    {
+        if (sortedValues.empty())
+            return 0.0;
+        size_t index = (size_t)(fraction * (double)sortedValues.size());
+        if (index >= sortedValues.size())
+            index = sortedValues.size() - 1;
+        return sortedValues[index];
+    }
+
+    QualityRange qualityRange(std::vector<double>& values)
+    {
+        QualityRange range;
+        if (values.empty())
+            return range;
+        std::sort(values.begin(), values.end());
+        range.min = values.front();
+        range.p50 = qualityQuantile(values, 0.5);
+        range.p95 = qualityQuantile(values, 0.95);
+        range.max = values.back();
+        return range;
+    }
+
+}
+
+QualityStats collectQuality(const std::vector<Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& faces, double bboxDiagonal)
+{
+    QualityStats quality;
+
+    // "Zero length" means zero: the number is compared against another tool's count
+    // of collapsed edges, and a threshold that moves with the model size makes the
+    // two disagree on every mesh that is not authored at 1 m.  The weld pass that
+    // removes them works with a relative epsilon of its own; this is the report, so
+    // it says what a collapsed edge is in any unit.
+    const double diagonal = (bboxDiagonal > 0.0) ? bboxDiagonal : 0.0;
+    const double zeroLengthThreshold = 1e-12;
+    const double zeroAreaThreshold = std::max(1e-18, 1e-14 * diagonal * diagonal);
+
+    // One table serves both the topology and the geometry: an edge's multiplicity
+    // says whether it is a boundary edge, and its two endpoints say how long it is
+    // and which vertices it gives valence to.  Building it once keeps the function
+    // at one face pass plus one table pass, which is what makes 20k faces fit in a
+    // frame's worth of time without reaching for TBB.
+    std::unordered_map<QualityEdgeKey, size_t, QualityEdgeKeyHash> edgeFaceCount;
+    edgeFaceCount.reserve(faces.size() * 3);
+    std::vector<double> quadAspects;
+    quadAspects.reserve(faces.size() / 2);
+
+    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+        const std::vector<size_t>& face = faces[faceIndex];
+        if (face.size() < 3) {
+            // Fewer than three corners bounds no area, and analyzeTopology already
+            // calls that degenerate; both reports then agree on the same file.
+            ++quality.degenerateFaces;
+            continue;
+        }
+
+        bool indicesValid = true;
+        for (size_t i = 0; i < face.size(); ++i) {
+            if (face[i] >= vertices.size()) {
+                indicesValid = false;
+                break;
+            }
+        }
+
+        bool degenerate = false;
+        for (size_t i = 0; i < face.size() && !degenerate; ++i) {
+            for (size_t j = i + 1; j < face.size(); ++j) {
+                if (face[i] == face[j]) {
+                    degenerate = true;
+                    break;
+                }
+            }
+        }
+
+        double area = 0.0;
+        if (indicesValid) {
+            // The same fan decomposition analyzeTopology uses, so the two
+            // functions cannot disagree on whether a given quad has area.
+            for (size_t i = 2; i < face.size(); ++i)
+                area += Vector3::area(vertices[face[0]], vertices[face[i - 1]], vertices[face[i]]);
+        }
+        // A negated comparison, so a NaN area from non-finite input counts as
+        // degenerate instead of slipping through as "not small enough".
+        if (!(area > zeroAreaThreshold))
+            degenerate = true;
+        if (degenerate)
+            ++quality.degenerateFaces;
+
+        if (4 == face.size() && indicesValid) {
+            double shortest = 0.0;
+            double longest = 0.0;
+            for (size_t i = 0; i < 4; ++i) {
+                const double length = (vertices[face[(i + 1) % 4]] - vertices[face[i]]).length();
+                if (0 == i || length < shortest)
+                    shortest = length;
+                if (0 == i || length > longest)
+                    longest = length;
+            }
+            // A zero shortest side has no finite ratio: leaving it in would put an
+            // infinity into a list that is then sorted and indexed, so one collapsed
+            // quad would drag p95 to inf on an otherwise healthy mesh.  Such a quad
+            // is still visible - as a zero length edge, and as a zero area face when
+            // the collapse takes the whole area with it - and both aspect numbers
+            // below describe the same set of quads so they cannot be read as two
+            // different populations.
+            if (shortest > 0.0 && std::isfinite(longest)) {
+                quadAspects.push_back(longest / shortest);
+                if (area > 0.0 && std::isfinite(area)) {
+                    const double areaAspect = longest * longest / (4.0 * area);
+                    if (areaAspect > quality.quadAspectAreaMax)
+                        quality.quadAspectAreaMax = areaAspect;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < face.size(); ++i) {
+            const size_t from = face[i];
+            const size_t to = face[(i + 1) % face.size()];
+            // A repeated index makes a self loop with no direction and no length; it
+            // is skipped here exactly as analyzeTopology skips it, so the edge counts
+            // of the two functions stay comparable on the same file.
+            if (from == to || from >= vertices.size() || to >= vertices.size())
+                continue;
+            const QualityEdgeKey key = (from < to) ? QualityEdgeKey(from, to) : QualityEdgeKey(to, from);
+            auto insertResult = edgeFaceCount.insert(std::make_pair(key, (size_t)1));
+            if (!insertResult.second)
+                ++insertResult.first->second;
+        }
+    }
+
+    std::vector<size_t> valence(vertices.size(), 0);
+    std::vector<bool> onBoundaryEdge(vertices.size(), false);
+    std::vector<double> edgeLengths;
+    edgeLengths.reserve(edgeFaceCount.size());
+
+    for (const auto& it : edgeFaceCount) {
+        const size_t from = it.first.first;
+        const size_t to = it.first.second;
+        // valence counts distinct edges, not incident corners: a quad touching the
+        // same edge twice is a broken face, not a higher valence.
+        ++valence[from];
+        ++valence[to];
+        if (1 == it.second) {
+            onBoundaryEdge[from] = true;
+            onBoundaryEdge[to] = true;
+        }
+        const double length = (vertices[to] - vertices[from]).length();
+        // Filtered before it reaches the sorter: sorting a list containing NaN is
+        // undefined behaviour, not merely a bad maximum.
+        if (std::isfinite(length)) {
+            edgeLengths.push_back(length);
+            if (length <= zeroLengthThreshold)
+                ++quality.zeroLengthEdges;
+        }
+    }
+
+    for (size_t vertexIndex = 0; vertexIndex < valence.size(); ++vertexIndex) {
+        const size_t vertexValence = valence[vertexIndex];
+        if (vertexValence > quality.valenceMax)
+            quality.valenceMax = vertexValence;
+        // valence 0 means no face touches the vertex, so it is not on the surface
+        // at all; counting it would invent a pole for a stray point.
+        if (0 == vertexValence || onBoundaryEdge[vertexIndex])
+            continue;
+        ++quality.interiorVertices;
+        if (3 == vertexValence)
+            ++quality.valence3;
+        else if (4 == vertexValence)
+            ++quality.valence4;
+        else if (5 == vertexValence)
+            ++quality.valence5;
+        else if (vertexValence > 5)
+            ++quality.valenceGt5;
+        if (4 != vertexValence)
+            ++quality.poleCount;
+    }
+
+    if (quality.interiorVertices > 0)
+        quality.polesPct = 100.0 * (double)quality.poleCount / (double)quality.interiorVertices;
+
+    quality.edgeLength = qualityRange(edgeLengths);
+    quality.quadAspect = qualityRange(quadAspects);
+    return quality;
 }
 
 }

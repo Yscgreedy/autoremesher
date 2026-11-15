@@ -56,6 +56,78 @@ ChartSplit splitAtChartSeams(const std::vector<Vector3>& vertices,
     const std::vector<int>& faceCharts = std::vector<int>(),
     double uvScale = 0.0);
 
+// How well the UVs a remesh produced can actually be baked.
+//
+// "Bakeable" is not "the UVs look fine in the viewport".  A bake samples the map
+// per texel, so a layout only works when the charts stay inside the [0,1] cover
+// square (area <= 1) and no two triangles fight over the same texel (overlap
+// ~ 0).  A layout can be seamless and still fail this: the remesher lays charts
+// out as strips and normalises the whole mesh by max(spanU, spanV), which leaves
+// charts stacked on top of each other, and corner UVs are per-triangle affine
+// extrapolations that do not stitch neighbouring faces of one chart.
+//
+// Every number here is defined so that an independent measurement of the
+// exported OBJ reproduces it - the fan-triangulated face areas and a 512x512
+// coverage grid are what tools/capability_gate.py and an actual bake see -
+// because a metric the consumer cannot cross-check against Blender is worth
+// less than no metric.  Fan triangulation (0,k,k+1) is part of that definition:
+// the corner/hybrid/seam modes emit quads whose UVs are computed per triangle,
+// so a folded corner has to be measured per triangle on both sides of the table.
+struct UvStats {
+    // Sum of |det|/2 over the fan triangles of every face, in cover-square UV
+    // units.  It is a hard lower bound rather than a heuristic: if the area
+    // exceeds 1 the triangles cannot all fit inside [0,1]^2 without covering
+    // something twice.
+    double area = 0.0;
+    // Percentage of covered cells that more than one triangle covers, over the
+    // [0,1]^2 square cut into 512x512 cells.  A cell counts as covered when its
+    // centre lies inside a triangle; the per-cell count saturates at 2 because
+    // the question is only "is this texel claimed twice", and a fifth overlapping
+    // chart does not make the bake any more broken than the second one.
+    // Cells whose centre falls outside the square are dropped, never clamped to
+    // the border: clamping would fold the out-of-range part of an oversized
+    // layout back onto an edge and report overlap for geometry that simply is
+    // not in the cover.  0 when nothing is covered.  Deterministic - one thread,
+    // fixed pixel order, no container iteration order involved.
+    double overlapPct = 0.0;
+    // Number of distinct ids in faceCharts; 0 when the caller passed none.
+    size_t chartCount = 0;
+    // Relative stretch of the worst triangle, in units of the model's own texel
+    // density: per triangle, (longest UV edge / longest 3D edge), then the
+    // largest of those ratios divided by the median of all of them.  The raw
+    // ratio is useless across models because it carries the global UV-to-world
+    // scale; dividing by the median cancels it, so 1.0 reads as "no worse than
+    // this model's typical triangle" and 4.0 as "squeezed four times harder",
+    // whatever unit the mesh is in.  0 when no triangle was measurable, or when
+    // the median itself is 0 (then the ratio carries no information).
+    double maxStretch = 0.0;
+    double medianStretch = 0.0;
+    // area <= 1 + 1e-6 && overlapPct < 1.0, and nothing else.  Deliberately just
+    // these two conditions, so the flag keeps saying exactly one thing - the
+    // layout is an injective map into the cover - and stays comparable with
+    // hand measurements; chartCount and the stretch numbers are diagnostics for
+    // the caller, since a single chart with a huge stretch is still bakeable.
+    bool bakeable = false;
+    // Fan triangles left out of every metric above: UVs that are not finite, UV
+    // area 0 (a collapsed or folded-flat triangle says nothing about stretch),
+    // and the fan triangles of faces whose UV corner count does not match their
+    // vertex count.  Surfaced because a large count means the numbers above
+    // describe only part of the mesh - the usual cause is a bake that silently
+    // covers half the model.
+    size_t strayTriangles = 0;
+};
+
+// Measures the UVs the way a bake would see them.  vertices/faces describe the
+// 3D mesh (only its edge lengths are used, for the stretch ratios); faceUvs
+// holds one UV per face corner, in faces order; faceCharts is optional and only
+// feeds chartCount.  Faces without a matching UV list are counted in
+// strayTriangles and otherwise ignored, so a partially unwrapped mesh still
+// yields usable numbers for the part that is unwrapped.
+UvStats collectUvStats(const std::vector<Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& faces,
+    const std::vector<std::vector<Vector2>>& faceUvs,
+    const std::vector<int>& faceCharts);
+
 }
 
 #endif

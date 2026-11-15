@@ -25,6 +25,7 @@
 #include <AutoRemesher/MeshSymmetry>
 #include <AutoRemesher/Progress>
 #include <AutoRemesher/TopologyStats>
+#include <AutoRemesher/UvCharts>
 #include <AutoRemesher/Vector3>
 #include <atomic>
 #include <chrono>
@@ -171,6 +172,14 @@ public:
         m_localRemesh = enabled;
     }
 
+    // Longest-edge collapse for quads whose max/min edge ratio is above this.
+    // 0 keeps every sliver the cleanup passes produced; the measured output had a
+    // ratio of 158..5313 on the shoe, which is below "can be modelled on".
+    void setMaximumAspect(double maximumAspect)
+    {
+        m_maximumAspect = maximumAspect;
+    }
+
     const std::vector<Vector3>& remeshedVertices()
     {
         return m_remeshedVertices;
@@ -209,6 +218,20 @@ public:
     void setUvSeamSplitting(bool enabled)
     {
         m_uvSeamSplitting = enabled;
+    }
+
+    // Pack the finished layout into [0,1]^2 chart by chart.  The historical
+    // layout gives every island a strip and normalises by the largest span, which
+    // leaves the charts stacked on top of each other: measured on a shoe, every
+    // mode overlapped, so a bake smeared faces into each other.
+    void setUvPacking(bool enabled)
+    {
+        m_uvPacking = enabled;
+    }
+
+    const UvPackResult& uvPackResult() const
+    {
+        return m_uvPackResult;
     }
 
     const std::vector<std::vector<size_t>>& remeshedQuads()
@@ -494,6 +517,8 @@ private:
     bool m_exactTargetQuads = false;
     bool m_exportUvs = true;
     bool m_uvSeamSplitting = false;
+    bool m_uvPacking = true;
+    UvPackResult m_uvPackResult;
     int m_symmetryAxis = 0;
     double m_symmetryPlane = 0.0;
     bool m_symmetryPlaneKnown = false;
@@ -513,6 +538,7 @@ private:
     bool m_gradedHoleFilling = true;
     bool m_projectedHoleCaps = false;
     bool m_localRemesh = false;
+    double m_maximumAspect = 0.0;
     TopologyStats m_inputStats;
     TopologyStats m_outputStats;
     bool m_inputAnalyzed = false;

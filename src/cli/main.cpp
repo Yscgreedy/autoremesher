@@ -157,6 +157,8 @@ struct Options {
     // Every flag the command line actually named, so a preset file can fill in
     // the rest without silently overriding an explicit choice.
     std::set<std::string> explicitFlags;
+    // Chart-aware UV packing; --no-uv-pack restores the historical strip layout.
+    bool uvPacking = true;
     // Degenerate cleanup: zero length edges, degenerate and duplicate faces.
     bool cleanDegenerate = true;
     double maxAspect = 0.0; // 0 = report only, do not collapse anything
@@ -699,6 +701,10 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             }
         } else if (arg == "--no-uv") {
             options->writeUvs = false;
+        } else if (arg == "--uv-pack") {
+            options->uvPacking = true;
+        } else if (arg == "--no-uv-pack") {
+            options->uvPacking = false;
         } else if (arg == "--no-normals") {
             options->writeNormals = false;
         } else if (arg == "--json") {
@@ -1523,7 +1529,7 @@ bool topologiesAgree(const AutoRemesher::TopologyStats& first,
 // for the same texels.  area > 1 means the layout overlaps itself even before
 // the per-triangle test runs, so both have to hold.
 std::string uvStatsJson(const AutoRemesher::UvStats& stats, const std::string& mode,
-    size_t chartCount)
+    size_t chartCount, const AutoRemesher::UvPackResult& pack)
 {
     std::ostringstream out;
     out.setf(std::ios::fixed);
@@ -1536,6 +1542,9 @@ std::string uvStatsJson(const AutoRemesher::UvStats& stats, const std::string& m
         << ",\"median_stretch\":" << stats.medianStretch
         << ",\"stray_triangles\":" << stats.strayTriangles
         << ",\"bakeable\":" << ((stats.area > 1e-12 && stats.area <= 1.0 + 1e-6 && stats.overlapPct < 1.0) ? "true" : "false")
+        << ",\"packed\":" << (pack.ok ? "true" : "false")
+        << ",\"packed_charts\":" << pack.packedCharts
+        << ",\"pack_fill\":" << std::setprecision(4) << pack.fillRatio
         << "}";
     return out.str();
 }
@@ -1817,9 +1826,20 @@ int main(int argc, char** argv)
     remesher.setGradedHoleFilling(options.gradedHoles);
     remesher.setProjectedHoleCaps(options.projectedCaps);
     remesher.setLocalRemesh(options.localRemesh);
+    remesher.setMaximumAspect(options.maxAspect);
     remesher.setExportUvs(options.writeUvs);
-    const bool seamSplit = options.uvMode == "seam" && options.symmetryAxis == 0;
+    // A per-vertex UV channel can only describe charts that do not share vertices,
+    // so packing a vertex-mode layout needs the mesh cut at the chart seams.  Without
+    // the cut, two charts average into one UV and the quad that spans them becomes
+    // enormous in UV space - which is not a layout, it is a bug you can see.
+    const bool wantsVertexChannel = options.uvMode == "vertex" || options.uvMode == "seam";
+    const bool seamSplit = wantsVertexChannel && options.uvPacking && options.symmetryAxis == 0;
     remesher.setUvSeamSplitting(seamSplit);
+    // Packing rewrites the per-corner channel.  A per-vertex channel cannot be
+    // packed chart by chart without first grouping the faces by vertex
+    // connectivity, so it keeps the historical layout for now; --uv-mode seam is
+    // the mode that is meant to be baked.
+    remesher.setUvPacking(options.uvPacking && !(options.uvMode == "vertex" || options.uvMode == "seam"));
     remesher.setMeasureDeviation(options.measureDeviation);
     if (options.uvMode == "seam" && options.symmetryAxis > 0) {
         if (options.json) {
@@ -2105,7 +2125,7 @@ int main(int argc, char** argv)
                 << ",\"uvs\":" << (uvMode != "none" ? "true" : "false")
                 << ",\"uvMode\":\"" << uvMode << "\""
                 << ",\"uvCorners\":" << uvCorners
-                << ",\"uvStats\":" << (haveUvStats ? uvStatsJson(uvStats, uvMode, remesher.uvChartCount()) : "null")
+                << ",\"uvStats\":" << (haveUvStats ? uvStatsJson(uvStats, uvMode, remesher.uvChartCount(), remesher.uvPackResult()) : "null")
                 << ",\"symmetry\":{\"axis\":\"" << symmetryAxisName(options.symmetryAxis) << "\""
                 << ",\"mode\":\"" << jsonEscape(options.symmetryMode) << "\""
                 << ",\"keep_positive\":" << (options.symmetryKeepPositive ? "true" : "false")

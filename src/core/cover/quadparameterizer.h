@@ -37,6 +37,11 @@ public:
         std::vector<Vector3> field;
         std::vector<int> cornerRotations;
         std::vector<size_t> singularVertices;
+        // Chart id per triangle: two triangles share a chart when their cover UVs
+        // agree on the edge they share.  Across a seam the values differ by whole
+        // cover cells, so this is the solver's own answer to "where are the cuts",
+        // instead of something a downstream consumer has to guess from the UVs.
+        std::vector<int> triangleCharts;
     };
     static bool parameterize(const std::vector<Vector3>& vertices,
         const std::vector<std::vector<size_t>>& triangles,

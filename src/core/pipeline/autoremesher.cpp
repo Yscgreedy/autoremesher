@@ -509,13 +509,21 @@ void AutoRemesher::updateProgress(size_t threadIndex, float progress, const char
     m_reportedStatus = islandStatus;
 
     // With several islands in flight, the run as a whole is only as far along as
-    // its slowest island, so that is the step worth naming.
-    size_t slowest = threadIndex;
-    for (size_t i = 0; i < m_threadProgress.size(); ++i) {
-        if (m_threadProgress[i] < m_threadProgress[slowest])
-            slowest = i;
+    // its slowest island, so that is the step worth naming.  Finding it costs a
+    // scan over every island, and a 17,958 island model reports hundreds of
+    // thousands of times, so the scan is rate limited: the percentage is always
+    // exact, only the label can lag by a frame.
+    const auto now = std::chrono::steady_clock::now();
+    if (m_slowestIsland == m_threadProgress.size()
+        || now - m_lastSlowestScan >= std::chrono::milliseconds(20)) {
+        m_lastSlowestScan = now;
+        m_slowestIsland = threadIndex;
+        for (size_t i = 0; i < m_threadProgress.size(); ++i) {
+            if (m_threadProgress[i] < m_threadProgress[m_slowestIsland])
+                m_slowestIsland = i;
+        }
     }
-    const char* name = m_threadStatus[slowest];
+    const char* name = m_threadStatus[m_slowestIsland];
     m_progressHandler(m_tag, (float)overall, nullptr != name ? name : "");
 }
 
@@ -1072,6 +1080,8 @@ bool AutoRemesher::remesh()
             && !thread.island->vertices.empty()) {
             UvTransfer transfer(thread.island->vertices, thread.island->triangles, thread.capturedUvs);
             if (transfer.valid()) {
+                // (the fallback for an island without a usable transfer is the
+                // extractor's per-vertex UVs, handled below by the caller)
                 islandUvsOk = true;
                 islandFaceUvs.reserve(quads.size());
                 for (const auto& quad : quads) {
@@ -1104,11 +1114,12 @@ bool AutoRemesher::remesh()
                     // parameterization) would collapse the face in UV space, so
                     // that face falls back to its own planar frame.
                     if (!(std::fabs(polygonUvArea(cornerUvs)) > 0.0)) {
-                        cornerUvs = planarFaceUvs(vertices, quad);
-                        if (cornerUvs.empty()) {
-                            islandUvsOk = false;
-                            break;
-                        }
+                        // A degenerate chart on one face must not cost the whole run
+                        // its UVs: try the face's own plane, and if even that is
+                        // impossible keep the chart values rather than failing.
+                        const std::vector<Vector2> planar = planarFaceUvs(vertices, quad);
+                        if (!planar.empty())
+                            cornerUvs = planar;
                     }
                     islandFaceUvs.push_back(cornerUvs);
                 }
@@ -1128,6 +1139,11 @@ bool AutoRemesher::remesh()
         // open edges.  Symmetry wins, the UVs stay per-vertex.
         if (m_exportUvs && m_uvSeamSplitting && m_symmetryAxis == 0 && islandUvsOk
             && islandFaceUvs.size() == quads.size() && !quads.empty()) {
+            // The per-face UVs come from the cover; the split decision is made by
+            // comparing them on shared edges.  The solver's own chart ids
+            // (Parameterizer::triangleCharts) are exposed for a future extractor
+            // that tags each cross point with its chart; on their own they do not
+            // match the per-triangle integer branches the isolines use here.
             ChartSplit split = splitAtChartSeams(vertices, quads, islandFaceUvs);
             if (split.faces.size() == quads.size()
                 && split.vertexUvs.size() == split.vertices.size() && !split.vertices.empty()) {

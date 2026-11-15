@@ -50,6 +50,13 @@ public:
         return m_originalTriangleUvs;
     }
 
+    // Chart id per triangle, straight from the cover solve (see
+    // QuadParameterizer::Result::triangleCharts).
+    const std::vector<int>& triangleCharts() const
+    {
+        return m_triangleCharts;
+    }
+
     const std::vector<Vector3>& singularVertexPositions() const
     {
         return m_singularVertexPositions;
@@ -111,6 +118,7 @@ private:
     std::vector<Vector3> m_singularVertexPositions;
     std::vector<size_t> m_singularVertexIndices;
     std::vector<std::vector<Vector2>> m_originalTriangleUvs;
+    std::vector<int> m_triangleCharts;
     double m_scaling = 1.0;
     double m_adaptivity = 0.5;
     double m_sharpEdgeDegrees = 90.0;

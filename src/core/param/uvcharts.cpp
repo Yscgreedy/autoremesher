@@ -48,6 +48,7 @@ double uvDistance(const Vector2& first, const Vector2& second)
 ChartSplit splitAtChartSeams(const std::vector<Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
     const std::vector<std::vector<Vector2>>& faceUvs,
+    const std::vector<int>& faceCharts,
     double uvScale)
 {
     ChartSplit result;
@@ -147,8 +148,14 @@ ChartSplit splitAtChartSeams(const std::vector<Vector3>& vertices,
     }
 
     std::vector<size_t> chart(faces.size());
-    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex)
-        chart[faceIndex] = findRoot(faceIndex);
+    if (faceCharts.size() == faces.size()) {
+        // The solver told us where it cut: use its ids as they are.
+        for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex)
+            chart[faceIndex] = (size_t)(unsigned int)faceCharts[faceIndex];
+    } else {
+        for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex)
+            chart[faceIndex] = findRoot(faceIndex);
+    }
     std::vector<size_t> chartIds(chart);
     std::sort(chartIds.begin(), chartIds.end());
     chartIds.erase(std::unique(chartIds.begin(), chartIds.end()), chartIds.end());

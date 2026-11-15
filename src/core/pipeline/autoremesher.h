@@ -409,6 +409,8 @@ private:
     // fine-grained update stays O(1) rather than a scan of every island.
     double m_progressSum = 0.0;
     int m_reportedPermille = -1;
+    std::chrono::steady_clock::time_point m_lastSlowestScan;
+    size_t m_slowestIsland = (size_t)-1;
     const char* m_reportedStatus = nullptr;
     std::vector<std::string> m_phaseReport;
     mutable std::mutex m_progressMutex;

@@ -642,6 +642,10 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             const std::string mode = value();
             if (mode == "check" || mode == "snap" || mode == "mirror" || mode == "mirror-half") {
                 options->symmetryMode = mode == "mirror-half" ? "mirror" : mode;
+                // A mode without an axis still needs one; x is what a single-view
+                // asset is built along, and silently doing nothing is worse.
+                if (0 == options->symmetryAxis)
+                    options->symmetryAxis = 1;
             } else {
                 fprintf(stderr, "unknown symmetry mode '%s' (check|snap|mirror-half)\n", mode.c_str());
                 *exitCode = 1;

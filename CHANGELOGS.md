@@ -43,6 +43,8 @@ Unreleased
   12k sphere the solver sees one chart while the extraction needs 22 seams.  The
   ids are exposed for the extractor change that will tag each cross point with
   them, and are computed in one pass over the triangles.
+- The Go GUI passes `--deviation` by default (a checkbox under Advanced turns it
+  off) and shows mean / p95 / max in the result stats panel and the log
 - `--deviation`: the CLI reports how far the output sits from the input surface
   (exact point-triangle distance, uniform grid over the input triangles):
   mean/p50/p95/max in `result.deviation` and one human line.  Sphere 12k: mean

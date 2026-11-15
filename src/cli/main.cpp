@@ -850,6 +850,7 @@ bool loadObj(const std::string& path,
 bool loadObjPolygons(const std::string& path,
     std::vector<AutoRemesher::Vector3>* vertices,
     std::vector<std::vector<size_t>>* faces,
+    std::vector<std::vector<AutoRemesher::Vector2>>* faceUvs,
     std::string* error)
 {
     std::ifstream stream(path, std::ios::binary);
@@ -857,12 +858,25 @@ bool loadObjPolygons(const std::string& path,
         *error = "failed to reopen " + displayPath(path);
         return false;
     }
+    std::vector<AutoRemesher::Vector2> textureCoordinates;
     std::string line;
     while (std::getline(stream, line)) {
         if (!line.empty() && line.back() == '\r')
             line.pop_back();
         if (line.size() < 2)
             continue;
+        if (line[0] == 'v' && line[1] == 't') {
+            const char* cursor = line.c_str() + 3;
+            char* end = nullptr;
+            const double u = strtod(cursor, &end);
+            double v = 0.0;
+            if (end != cursor) {
+                cursor = end;
+                v = strtod(cursor, &end);
+            }
+            textureCoordinates.push_back(AutoRemesher::Vector2(u, v));
+            continue;
+        }
         if (line[0] == 'v' && (line[1] == ' ' || line[1] == '\t')) {
             const char* cursor = line.c_str() + 2;
             char* end = nullptr;
@@ -881,6 +895,7 @@ bool loadObjPolygons(const std::string& path,
         } else if (line[0] == 'f' && (line[1] == ' ' || line[1] == '\t')) {
             const size_t vertexCount = vertices->size();
             std::vector<size_t> face;
+            std::vector<size_t> faceUvIndices;
             const char* cursor = line.c_str() + 2;
             while (*cursor) {
                 while (*cursor == ' ' || *cursor == '\t')
@@ -892,8 +907,18 @@ bool loadObjPolygons(const std::string& path,
                 if (end == cursor)
                     break;
                 cursor = end;
-                while (*cursor && *cursor != ' ' && *cursor != '\t')
+                long uvIndex = 0;
+                if (*cursor == '/') {
                     ++cursor;
+                    if (*cursor != '/') {
+                        uvIndex = strtol(cursor, &end, 10);
+                        if (end != cursor)
+                            cursor = end;
+                    }
+                    // Skip the normal index: this reader only needs v and vt.
+                    while (*cursor && *cursor != ' ' && *cursor != '\t')
+                        ++cursor;
+                }
                 if (0 == index)
                     continue;
                 size_t resolved = 0;
@@ -908,9 +933,28 @@ bool loadObjPolygons(const std::string& path,
                 if (resolved >= vertexCount)
                     continue;
                 face.push_back(resolved);
+                if (uvIndex > 0)
+                    faceUvIndices.push_back(static_cast<size_t>(uvIndex - 1));
+                else
+                    faceUvIndices.push_back((size_t)-1);
             }
-            if (face.size() >= 3)
+            if (face.size() >= 3) {
+                // The UVs are read from the file, not reconstructed from the core:
+                // four modes write four different channels, and "what did I write"
+                // is exactly the question this measurement answers.
+                std::vector<AutoRemesher::Vector2> cornerUvs;
+                if (nullptr != faceUvs) {
+                    cornerUvs.resize(face.size());
+                    for (size_t corner = 0; corner < face.size(); ++corner) {
+                        const size_t uvIndex = faceUvIndices[corner];
+                        if ((size_t)-1 != uvIndex && uvIndex < textureCoordinates.size())
+                            cornerUvs[corner] = textureCoordinates[uvIndex];
+                    }
+                }
                 faces->push_back(std::move(face));
+                if (nullptr != faceUvs)
+                    faceUvs->push_back(std::move(cornerUvs));
+            }
         }
     }
     return true;
@@ -1939,11 +1983,12 @@ int main(int argc, char** argv)
     // what an outside tool reports as non-manifold.
     std::vector<AutoRemesher::Vector3> writtenVertices;
     std::vector<std::vector<size_t>> writtenFaces;
+    std::vector<std::vector<AutoRemesher::Vector2>> writtenFaceUvs;
     bool haveExported = false;
     AutoRemesher::TopologyStats exportedStats;
     {
         std::string readError;
-        if (loadObjPolygons(options.output, &writtenVertices, &writtenFaces, &readError)) {
+        if (loadObjPolygons(options.output, &writtenVertices, &writtenFaces, &writtenFaceUvs, &readError)) {
             exportedStats = AutoRemesher::analyzeTopology(writtenVertices, writtenFaces);
             haveExported = true;
         } else {
@@ -1953,31 +1998,13 @@ int main(int argc, char** argv)
     AutoRemesher::QualityStats quality = remesher.qualityStats();
     AutoRemesher::UvStats uvStats;
     bool haveUvStats = false;
-    if (options.writeUvs && uvMode != "none") {
-        // Measure the channel that was actually written, resolved to one UV pair
-        // per face corner: corner and hybrid carry per-corner UVs (hybrid only for
-        // the faces the vertex UVs would have stretched), vertex and seam carry one
-        // UV per vertex.  Flattening both to corners is what makes the four modes
-        // comparable, and it is exactly what a baker sees in the file.
-        const std::vector<std::vector<AutoRemesher::Vector2>>& cornerUvs = remesher.remeshedFaceUvs();
-        const std::vector<AutoRemesher::Vector2>& vertexUvsRef = remesher.remeshedVertexUvs();
-        const std::vector<std::vector<size_t>>& uvFaces = remesher.remeshedQuads();
-        std::vector<std::vector<AutoRemesher::Vector2>> measuredFaceUvs(uvFaces.size());
-        for (size_t index = 0; index < uvFaces.size(); ++index) {
-            if (index < cornerUvs.size() && cornerUvs[index].size() == uvFaces[index].size()) {
-                measuredFaceUvs[index] = cornerUvs[index];
-                continue;
-            }
-            measuredFaceUvs[index].resize(uvFaces[index].size());
-            for (size_t corner = 0; corner < uvFaces[index].size(); ++corner) {
-                const size_t vertex = uvFaces[index][corner];
-                measuredFaceUvs[index][corner] = vertex < vertexUvsRef.size()
-                    ? vertexUvsRef[vertex]
-                    : AutoRemesher::Vector2();
-            }
-        }
-        uvStats = AutoRemesher::collectUvStats(remesher.remeshedVertices(), uvFaces,
-            measuredFaceUvs, std::vector<int>());
+    if (options.writeUvs && uvMode != "none" && haveExported) {
+        // Measured from the file, not from the core's arrays: the four UV modes
+        // write four different channels, and "is what I wrote bakeable" is a
+        // question about the file.  Reading the vt indices back resolves per-corner
+        // and per-vertex channels the same way a baker resolves them.
+        uvStats = AutoRemesher::collectUvStats(writtenVertices, writtenFaces, writtenFaceUvs,
+            std::vector<int>());
         uvStats.chartCount = remesher.uvChartCount();
         haveUvStats = true;
     }

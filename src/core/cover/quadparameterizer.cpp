@@ -44,6 +44,17 @@ namespace {
         return v.length() < 1e-12 ? fallback.normalized() : v.normalized();
     }
 
+    // The efficiency is a calibrated constant, so an out of range value is a
+    // caller mistake rather than a request to lean harder on the estimate; the
+    // band is wide enough for every model measured so far and narrow enough that
+    // a bad value cannot turn the budget into a runaway.
+    double clampExtractionEfficiency(double efficiency)
+    {
+        if (!(efficiency > 0.0) || !std::isfinite(efficiency))
+            return 0.955;
+        return std::min(1.2, std::max(0.5, efficiency));
+    }
+
     int edgeQuarterTurn(const SurfaceMesh& mesh, size_t corner,
         const std::vector<Vector3>& field, const std::vector<Vector3>& normals)
     {
@@ -713,7 +724,9 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     const std::vector<double>* faceScalingU,
     const std::vector<double>* faceScalingV,
     size_t targetQuadCount,
-    const ProgressHandler* progressHandler)
+    const ProgressHandler* progressHandler,
+    CoverBudgetReport* budgetReport,
+    double extractionEfficiency)
 {
     const auto report = [progressHandler](float fraction, const char* name) {
         if (nullptr != progressHandler && *progressHandler)
@@ -730,6 +743,19 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     const size_t uvVariables = 2 * corners;
     double scale = std::max(1e-12, scaling * mesh.averageEdgeLength());
     const double baseScale = scale;
+
+    // The report is written even when nobody asks for it: a local sink keeps the
+    // bookkeeping uniform instead of threading a nullable pointer through every
+    // branch, and clearing here means a reused instance never shows stale samples.
+    QuadParameterizer::CoverBudgetReport budgetSink;
+    QuadParameterizer::CoverBudgetReport* budget = nullptr != budgetReport ? budgetReport : &budgetSink;
+    const double efficiency = clampExtractionEfficiency(extractionEfficiency);
+    budget->attempts.clear();
+    budget->extractionEfficiency = efficiency;
+    budget->baseScale = baseScale;
+    budget->diverged = false;
+    budget->clamped = false;
+    budget->targetQuads = targetQuadCount;
 
     std::vector<Vector3> normals;
     initializeFieldAndNormals(mesh, guidance, &normals, &result->field);
@@ -763,9 +789,11 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     // produced quad count goes with 1/s^2, so the requested budget can be off by
     // more than 2x.  When a budget is given, solve the single scalar s with
     //     target = SUM_f area_f / (s * fs_f * u_f) / (s * fs_f * v_f)
-    // which is one square root, no iteration.  Measured quads track 1/s^2 to
-    // within +-3% (the --edge-scaling sweep in the assessment notes), so the
-    // closed form is enough; the clamp only guards degenerate islands.
+    // which is one square root, no iteration.  This is the start of the budget
+    // search rather than its answer: the closed form is accurate on the body and
+    // head models but lands 46% high on the shoe, so the samples below are what
+    // decides the scale.  The clamp keeps a degenerate island from asking for a
+    // scale the cover cannot represent.
     if (targetQuadCount > 0) {
         double quadFootprintSum = 0.0;
         for (size_t f = 0; f < mesh.faceCount(); ++f) {
@@ -783,7 +811,13 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         }
         if (quadFootprintSum > 0.0 && std::isfinite(quadFootprintSum)) {
             const double solved = std::sqrt(quadFootprintSum / (double)targetQuadCount);
-            scale = std::min(baseScale * 3.0, std::max(baseScale / 3.0, solved));
+            const double bounded = std::min(baseScale * 3.0, std::max(baseScale / 3.0, solved));
+            // A clamped start is worth reporting: the analytic scale wanted to
+            // leave the range the cover can be trusted in, so the first sample is
+            // not the one the model asked for.
+            if (bounded != solved)
+                budget->clamped = true;
+            scale = bounded;
             if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
                 char trace[512];
                 snprintf(trace, sizeof(trace),
@@ -856,13 +890,10 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     }
 
     // How many quads the parameterization covers is its UV area: one quad is one
-    // unit cell.  Extraction keeps about 95% of that (boundary trimming and the
-    // cleanup passes take the rest), so aim slightly above the budget and use the
-    // measured UV area to correct the scale.  UV area goes with 1/s^2, so one
-    // square root per attempt is enough; in practice the analytic start below is
-    // already within 20% and a second, corrected solve lands inside a few
-    // percent.  Only the cover is repeated - the curl correction and the seam
-    // stay as they are, because a global change of s scales UV uniformly.
+    // unit cell.  Extraction keeps most of that, so aim slightly above the budget
+    // and use the measured UV area to correct the scale.  Only the cover is
+    // repeated - the curl correction and the seam stay as they are, because a
+    // global change of s scales UV uniformly.
     const auto uvAreaOf = [&mesh, uvVariables](const std::vector<double>& values) {
         double area = 0.0;
         for (size_t f = 0; f < mesh.faceCount(); ++f) {
@@ -889,7 +920,33 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
     // boundary loss is the same order as their UV area, so the correction would
     // chase its own tail.  They keep the analytic scale and one cover solve.
     const bool tightenTarget = targetQuadCount >= 32;
-    const int maximumCoverAttempts = tightenTarget ? 3 : 1;
+    // The continuous part of the cover answers scale as 1/s^2, but the MILS
+    // rounding re-solves its integer part for every sample, so the measured UV
+    // area moves in steps: on the shoe at target 6000 a 1.21x step in scale
+    // doubled the area.  Following the closed form from one sample therefore
+    // walks away from the budget, which is how the old loop ended up shipping the
+    // last attempt at +157%.  A cover solve costs about 1.8 s, so the four
+    // attempts buy samples and a winner, not convergence.
+    const double scaleLowerBound = baseScale / 3.0;
+    const double scaleUpperBound = baseScale * 3.0;
+    const int maximumCoverAttempts = tightenTarget ? 4 : 1;
+    // A sample that overshot bounds the target scale from below and one that came
+    // short bounds it from above, so the pair brackets the answer once both exist.
+    double boundBelow = 0.0, boundAbove = 0.0;
+    // Solving a scale that was already solved would spend 1.8 s to reproduce a
+    // number already in the table.
+    const auto alreadyTried = [&budget](double candidate) {
+        for (const auto& sample : budget->attempts)
+            if (std::fabs(candidate - sample.scale) <= 1e-6 * std::max(std::fabs(sample.scale), 1e-30))
+                return true;
+        return false;
+    };
+    std::vector<double> bestValues;
+    size_t bestAttempt = 0;
+    double bestScale = scale, bestDeviation = 0.0, previousDeviation = 0.0;
+    double previousScale = scale, previousUvArea = 0.0;
+    bool haveBest = false;
+    int worseningStreak = 0;
     for (int attempt = 0; attempt < maximumCoverAttempts; ++attempt) {
         const CoverContext ctx { mesh, result->field, normals, rotation, seam, cornerConstraints,
             activeScalingU, activeScalingV, faceScaling, scale };
@@ -907,8 +964,7 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         // the test models that residual is a stable 4-5% on top of the boundary
         // strip, so judge the attempt by the calibrated estimate rather than by
         // the raw cell count.
-        const double extractionEfficiency = 0.955;
-        const double predictedQuads = (uvArea - boundaryLossCells) * extractionEfficiency;
+        const double predictedQuads = (uvArea - boundaryLossCells) * efficiency;
         const double error = predictedQuads / (double)targetQuadCount;
         if (nullptr != getenv("AR_TRACE_EXACT_TARGET")) {
             char trace[512];
@@ -917,16 +973,88 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
                 attempt, scale, uvArea, boundaryLossCells, predictedQuads, targetQuadCount, error);
             Log::write(Log::Normal, trace);
         }
-        if (std::fabs(error - 1.0) <= 0.02 || attempt + 1 == maximumCoverAttempts)
+        QuadParameterizer::CoverBudgetAttempt sample;
+        sample.scale = scale;
+        sample.uvArea = uvArea;
+        sample.boundaryLoss = boundaryLossCells;
+        sample.predicted = predictedQuads;
+        sample.error = error;
+        budget->attempts.push_back(sample);
+        const double deviation = std::fabs(error - 1.0);
+        // Keep a copy of the winning solve instead of re-running it at the end:
+        // the adopted scale is usually not the last one, and a second solve for it
+        // would cost another 1.8 s to reproduce a result already in hand.
+        if (!haveBest || deviation < bestDeviation) {
+            haveBest = true;
+            bestDeviation = deviation;
+            bestScale = scale;
+            bestAttempt = budget->attempts.size() - 1;
+            bestValues = allValues;
+        }
+        if (deviation <= 0.02)
             break;
+        if (error > 1.0) {
+            boundBelow = std::max(boundBelow, scale);
+        } else if (boundAbove <= 0.0 || scale < boundAbove) {
+            boundAbove = scale;
+        }
+        if (attempt + 1 == maximumCoverAttempts)
+            break;
+        // Two attempts in a row that both moved away from the budget mean the walk
+        // is not heading anywhere; the history already holds a better sample than
+        // whatever the next step would produce.
+        if (attempt > 0) {
+            if (deviation > previousDeviation) {
+                if (++worseningStreak >= 2) {
+                    budget->diverged = true;
+                    break;
+                }
+            } else {
+                worseningStreak = 0;
+            }
+        }
+        previousDeviation = deviation;
         // uvArea goes with 1/s^2 and the boundary loss with 1/s, so the next
         // scale solves uvArea/k^2 - P/(2 s k) = target for k.
-        const double neededUvArea = (double)targetQuadCount / extractionEfficiency + boundaryLossCells;
-        const double corrected = scale * std::sqrt(uvArea / neededUvArea);
-        const double next = std::min(baseScale * 3.0, std::max(baseScale / 3.0, corrected));
+        const double neededUvArea = (double)targetQuadCount / efficiency + boundaryLossCells;
+        double next = scale * std::sqrt(uvArea / neededUvArea);
+        // The end of the allowed range on the side the error asks for; used both as
+        // the midpoint anchor below and as the way out of a repeated probe.
+        const double farBound = error > 1.0 ? scaleUpperBound : scaleLowerBound;
+        if (boundBelow > 0.0 && boundAbove > 0.0) {
+            // Both sides have been sampled, so a step that leaves the bracket is an
+            // extrapolation nothing measured; bisect the bracket instead.
+            if (!(next > boundBelow && next < boundAbove))
+                next = std::sqrt(boundBelow * boundAbove);
+        } else if (attempt > 0 && ((scale > previousScale) == (uvArea > previousUvArea))) {
+            // Scale and area moved the same way, which is the opposite of what
+            // 1/s^2 predicts - the response is the staircase - so the model step is
+            // not evidence for anything.  Spend the attempt on the geometric
+            // midpoint between the best sample and the far bound.
+            next = std::sqrt(bestScale * farBound);
+        }
+        if (alreadyTried(next))
+            next = std::sqrt(next * farBound);
+        if (next < scaleLowerBound) {
+            next = scaleLowerBound;
+            budget->clamped = true;
+        } else if (next > scaleUpperBound) {
+            next = scaleUpperBound;
+            budget->clamped = true;
+        }
         if (std::fabs(next - scale) <= 1e-12 * scale)
             break;
+        previousScale = scale;
+        previousUvArea = uvArea;
         scale = next;
+    }
+
+    // Ship the best sample, not the last one: the loop stops as soon as it stops
+    // improving, so the final attempt is often the worst of the set.
+    if (haveBest && bestValues.size() == allValues.size()) {
+        allValues.swap(bestValues);
+        if (bestAttempt < budget->attempts.size())
+            budget->attempts[bestAttempt].used = true;
     }
 
     report(0.99f, "Building cover uvs");
@@ -949,5 +1077,24 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
         Log::write(Log::Normal, trace);
     }
     return true;
+}
+
+void QuadParameterizer::setExtractionEfficiency(double efficiency)
+{
+    m_extractionEfficiency = clampExtractionEfficiency(efficiency);
+}
+
+bool QuadParameterizer::parameterizeWithBudget(const std::vector<Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& triangles,
+    const std::vector<Vector3>* guidance, double scaling,
+    double hardEdgeDegrees, Result* result,
+    const std::vector<double>* faceScaling,
+    const std::vector<double>* faceScalingU,
+    const std::vector<double>* faceScalingV,
+    const ProgressHandler* progressHandler)
+{
+    return parameterize(vertices, triangles, guidance, scaling, hardEdgeDegrees, result,
+        faceScaling, faceScalingU, faceScalingV, m_targetQuadCount, progressHandler,
+        &m_budgetReport, m_extractionEfficiency);
 }
 }

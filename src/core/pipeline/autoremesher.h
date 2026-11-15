@@ -176,6 +176,15 @@ public:
         return m_remeshedFaceUvs;
     }
 
+    // One UV per remeshed vertex (same order), carried out of the extractor when it
+    // could keep the bookkeeping; empty when it could not and the per-face path is
+    // used instead.  Per-vertex UVs are continuous across every face that shares a
+    // vertex, which is what removes the seam the per-face fallback leaves.
+    const std::vector<Vector2>& remeshedVertexUvs()
+    {
+        return m_remeshedVertexUvs;
+    }
+
     // UV transfer costs one grid build per island; turn it off for a run that
     // only needs the geometry.
     void setExportUvs(bool enabled)
@@ -372,6 +381,7 @@ private:
     std::vector<std::vector<size_t>> m_triangles;
     std::vector<Vector3> m_remeshedVertices;
     std::vector<std::vector<Vector2>> m_remeshedFaceUvs;
+    std::vector<Vector2> m_remeshedVertexUvs;
     std::vector<std::vector<size_t>> m_remeshedQuads;
     std::vector<Vector3> m_decimatedVertices;
     std::vector<std::vector<size_t>> m_decimatedTriangles;

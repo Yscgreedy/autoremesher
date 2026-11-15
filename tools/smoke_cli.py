@@ -159,8 +159,17 @@ def main():
         # without vt has to be re-unwrapped before it can be textured.
         obj = count_obj(os.path.join(workspace, "out.obj"))
         check(result.get("uvs") is True, "result does not report uvs", failures)
-        check(obj["vt"] == obj["corners"],
-              "vt lines %d for %d face corners" % (obj["vt"], obj["corners"]), failures)
+        mode = result.get("uvMode")
+        check(mode in ("vertex", "corner", "hybrid"), "unknown uvMode %r" % mode, failures)
+        if mode == "corner":
+            check(obj["vt"] == obj["corners"],
+                  "vt lines %d for %d face corners (corner mode)" % (obj["vt"], obj["corners"]), failures)
+        else:
+            # vertex mode: one vt per vertex; hybrid: vertex ones plus corners for the
+            # faces the vertex UVs would stretch.
+            check(obj["vt"] >= obj["v"] and obj["vt"] <= obj["v"] + obj["corners"],
+                  "vt lines %d outside [%d, %d] for mode %r"
+                  % (obj["vt"], obj["v"], obj["v"] + obj["corners"], mode), failures)
         check(obj["vn"] == obj["v"], "vn lines %d for %d vertices" % (obj["vn"], obj["v"]), failures)
         check(obj["slashed"] == obj["f"], "faces are missing the vt/vn references", failures)
 
@@ -196,6 +205,12 @@ def main():
                  if event.get("type") == "warning"]
         check("input_open_boundary" in codes,
               "open shell did not warn about its boundary (codes: %r)" % codes, failures)
+
+        proc = run(binary, ["--input", model, "--output", os.path.join(workspace, "uvmode.obj"),
+                            "--target-quads", "500", "--uv-mode", "vertex", "--json", "--quiet"])
+        vertex_mode = (parse_events(proc.stdout)[-1] if proc.stdout.strip() else {}).get("uvMode")
+        check(proc.returncode == 0 and vertex_mode == "vertex",
+              "uv-mode vertex not honoured: %r" % vertex_mode, failures)
 
         # Symmetry cuts and mirrors: the result has to say what it cut and welded.
         proc = run(binary, ["--input", model, "--output", os.path.join(workspace, "sym.obj"),

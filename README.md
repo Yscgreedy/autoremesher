@@ -83,6 +83,7 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
   -i, --input PATH            input OBJ (polygons are triangulated)
   -o, --output PATH           output OBJ of quads with vt and vn (default:
                               <input>_remeshed.obj)
+      --uv-mode M             corner | vertex | hybrid (default corner)
       --no-uv                 do not write vt lines
       --no-normals            do not write vn lines
       --symmetry AXIS         x | y | z: cut the output at that plane and mirror the
@@ -117,8 +118,17 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
 
 Exit codes: `0` success, `1` usage/input error, `2` remeshing failed, `3` write failed.
 
-Output format: quad (and occasional n-gon) faces, with one `vt` per face corner and one
-`vn` per vertex. The UVs are the island's own parameterization, mapped onto each quad
+Output format: quad (and occasional n-gon) faces, with `vt` and one `vn` per vertex.
+`--uv-mode` picks which UV channel is written: `corner` (default) takes one UV per face
+corner from the cover chart under that face - correct where the cover has charts, but a
+seam sits between every pair of faces; `vertex` writes the extractor's own per-vertex
+UVs, continuous across any two faces that share a vertex, but a face whose corners come
+from different charts stretches across the seam; `hybrid` writes vertex UVs and falls
+back to per-corner UVs only for the faces where the two channels disagree on area.
+Measured on the 12k sphere: corner p99/p50 UV-area ratio 3.7 with 0 degenerate faces,
+vertex 62 with 9, hybrid 3.4 with 2. On a pathological 17,958-shell input the vertex
+channel is worse than corner (2,577 degenerate faces vs 38), which is why corner stays
+the default. The UVs are the island's own parameterization, mapped onto each quad
 through the chart under its centroid, so a cover seam falls between faces rather than
 through them; islands are laid out side by side in UV space and the whole set is
 normalized into the unit square. A face whose chart is degenerate falls back to its own

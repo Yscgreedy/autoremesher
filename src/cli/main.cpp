@@ -131,6 +131,7 @@ struct Options {
     int threads = 0;
     bool writeUvs = true;
     bool writeNormals = true;
+    std::string uvMode = "corner";
     int symmetryAxis = 0; // 0 off, 1 x, 2 y, 3 z
     double symmetryPlane = 0.0;
     double symmetryTolerance = 0.002;
@@ -199,6 +200,11 @@ const char* kUsage =
     "  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)\n"
     "      --no-uv                 do not write vt lines\n"
     "      --no-normals            do not write vn lines\n"
+    "      --uv-mode M             corner | vertex | hybrid (default corner):\n"
+    "                              corner lays one UV per face corner from the cover\n"
+    "                              chart, vertex shares the extractor's per-vertex\n"
+    "                              UVs, hybrid uses corners only for faces the vertex\n"
+    "                              UVs would stretch across a seam\n"
     "      --symmetry AXIS         x | y | z: snap the output onto its own mirror\n"
     "                              plane where both sides agree, and count where\n"
     "                              they do not (default off)\n"
@@ -366,6 +372,15 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->symmetryPlane = number();
         } else if (arg == "--symmetry-tolerance") {
             options->symmetryTolerance = number();
+        } else if (arg == "--uv-mode") {
+            const std::string mode = value();
+            if (mode == "corner" || mode == "vertex" || mode == "hybrid") {
+                options->uvMode = mode;
+            } else {
+                fprintf(stderr, "unknown uv mode '%s' (corner|vertex|hybrid)\n", mode.c_str());
+                *exitCode = 1;
+                return false;
+            }
         } else if (arg == "--no-uv") {
             options->writeUvs = false;
         } else if (arg == "--no-normals") {
@@ -547,8 +562,12 @@ std::vector<AutoRemesher::Vector3> computeVertexNormals(
 bool writeObj(const std::string& path,
     const std::vector<AutoRemesher::Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
+    const std::vector<AutoRemesher::Vector2>& vertexUvs,
     const std::vector<std::vector<AutoRemesher::Vector2>>& faceUvs,
     const std::vector<AutoRemesher::Vector3>& normals,
+    const std::string& mode,
+    std::string* uvMode,
+    size_t* writtenUvs,
     std::string* error)
 {
     FILE* file = fopen(path.c_str(), "wb");
@@ -556,16 +575,81 @@ bool writeObj(const std::string& path,
         *error = "failed to write " + displayPath(path);
         return false;
     }
-    // UVs are per corner: a quad takes the chart of its own centroid, so the
-    // corners belong to that face's parameterization, not to a shared vertex.
-    const bool hasUvs = faceUvs.size() == faces.size() && !faces.empty();
+    const bool wantVertex = mode != "corner";
+    const bool wantCorner = mode == "corner" || mode == "hybrid";
+    const bool hasVertexUvs = wantVertex && vertexUvs.size() == vertices.size() && !vertices.empty();
+    const bool hasFaceUvs = wantCorner && faceUvs.size() == faces.size() && !faces.empty();
     const bool hasNormals = normals.size() == vertices.size() && !vertices.empty();
+
+    // Per face: keep the shared vertex UVs unless this face cannot be described by
+    // them.  A face whose corners come from different charts of the cover would
+    // stretch across the seam, so it alone takes per-corner UVs.
+    const auto faceArea = [](const std::vector<AutoRemesher::Vector2>& source, const std::vector<size_t>& face) {
+        double area = 0.0;
+        for (size_t i = 0; i < face.size(); ++i) {
+            const size_t j = (i + 1) % face.size();
+            area += source[face[i]].x() * source[face[j]].y()
+                - source[face[j]].x() * source[face[i]].y();
+        }
+        return std::fabs(0.5 * area);
+    };
+    std::vector<char> cornerFace(faces.size(), 0);
+    if (hasVertexUvs && hasFaceUvs) {
+        // Compare the two channels face by face: they describe the same chart, so
+        // their areas should agree.  When they do not, the vertex UVs are mixing
+        // charts and only the per-corner ones keep that face honest.
+        for (size_t f = 0; f < faces.size(); ++f) {
+            const auto& face = faces[f];
+            if (face.size() < 3 || faceUvs[f].size() != face.size())
+                continue;
+            std::vector<size_t> local(face.size());
+            for (size_t i = 0; i < local.size(); ++i)
+                local[i] = i;
+            const double vertexArea = faceArea(vertexUvs, face);
+            const double cornerArea = faceArea(faceUvs[f], local);
+            cornerFace[f] = 1;
+            if (vertexArea > 0.0 && cornerArea > 0.0) {
+                const double ratio = vertexArea / cornerArea;
+                if (ratio > 0.5 && ratio < 2.0)
+                    cornerFace[f] = 0;
+            }
+        }
+    }
+
+    // Corner UVs are appended after the vertex ones; remember where each face starts.
+    std::vector<size_t> cornerBase(faces.size(), 0);
+    bool anyCorner = false;
+    size_t cornerCursor = hasVertexUvs ? vertices.size() : 0;
+    for (size_t f = 0; f < faces.size(); ++f) {
+        const auto& face = faces[f];
+        if (face.size() < 3)
+            continue;
+        const bool wantCorner = hasFaceUvs && faceUvs[f].size() == face.size()
+            && (!hasVertexUvs || cornerFace[f]);
+        if (!wantCorner)
+            continue;
+        cornerBase[f] = cornerCursor;
+        cornerCursor += face.size();
+        anyCorner = true;
+    }
+
     fprintf(file, "# AutoRemesher %s\n", AR_VERSION);
     for (const auto& vertex : vertices)
         fprintf(file, "v %.17g %.17g %.17g\n", vertex.x(), vertex.y(), vertex.z());
-    if (hasUvs) {
-        for (const auto& quadUvs : faceUvs) {
-            for (const auto& uv : quadUvs)
+    if (hasVertexUvs) {
+        for (const auto& uv : vertexUvs)
+            fprintf(file, "vt %.17g %.17g\n", uv.x(), uv.y());
+    }
+    if (anyCorner) {
+        for (size_t f = 0; f < faces.size(); ++f) {
+            const auto& face = faces[f];
+            if (face.size() < 3)
+                continue;
+            const bool wantCorner = hasFaceUvs && faceUvs[f].size() == face.size()
+                && (!hasVertexUvs || cornerFace[f]);
+            if (!wantCorner)
+                continue;
+            for (const auto& uv : faceUvs[f])
                 fprintf(file, "vt %.17g %.17g\n", uv.x(), uv.y());
         }
     }
@@ -573,33 +657,55 @@ bool writeObj(const std::string& path,
         for (const auto& normal : normals)
             fprintf(file, "vn %.17g %.17g %.17g\n", normal.x(), normal.y(), normal.z());
     }
-    size_t nextUv = 1;
-    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
-        const auto& face = faces[faceIndex];
+
+    size_t vertexModeFaces = 0;
+    size_t cornerModeFaces = 0;
+    for (size_t f = 0; f < faces.size(); ++f) {
+        const auto& face = faces[f];
         if (face.size() < 3)
             continue;
-        const bool faceHasUvs = hasUvs && faceUvs[faceIndex].size() == face.size();
+        const bool wantCorner = hasFaceUvs && faceUvs[f].size() == face.size()
+            && (!hasVertexUvs || cornerFace[f]);
+        if (wantCorner)
+            ++cornerModeFaces;
+        else if (hasVertexUvs)
+            ++vertexModeFaces;
         fputc('f', file);
         for (size_t corner = 0; corner < face.size(); ++corner) {
             const size_t vertexIndex = face[corner] + 1;
-            if (faceHasUvs && hasNormals)
-                fprintf(file, " %zu/%zu/%zu", vertexIndex, nextUv + corner, vertexIndex);
-            else if (faceHasUvs)
-                fprintf(file, " %zu/%zu", vertexIndex, nextUv + corner);
-            else if (hasNormals)
+            if (wantCorner) {
+                const size_t uvIndex = cornerBase[f] + corner + 1;
+                if (hasNormals)
+                    fprintf(file, " %zu/%zu/%zu", vertexIndex, uvIndex, vertexIndex);
+                else
+                    fprintf(file, " %zu/%zu", vertexIndex, uvIndex);
+            } else if (hasVertexUvs) {
+                if (hasNormals)
+                    fprintf(file, " %zu/%zu/%zu", vertexIndex, vertexIndex, vertexIndex);
+                else
+                    fprintf(file, " %zu/%zu", vertexIndex, vertexIndex);
+            } else if (hasNormals) {
                 fprintf(file, " %zu//%zu", vertexIndex, vertexIndex);
-            else
+            } else {
                 fprintf(file, " %zu", vertexIndex);
+            }
         }
         fputc('\n', file);
-        if (faceHasUvs)
-            nextUv += face.size();
     }
-    if (0 != fclose(file)) {
-        *error = "failed while writing " + displayPath(path);
-        return false;
+
+    if (nullptr != uvMode) {
+        if (cornerModeFaces > 0 && vertexModeFaces > 0)
+            *uvMode = "hybrid";
+        else if (cornerModeFaces > 0)
+            *uvMode = "corner";
+        else if (vertexModeFaces > 0)
+            *uvMode = "vertex";
+        else
+            *uvMode = "none";
     }
-    return true;
+    if (nullptr != writtenUvs)
+        *writtenUvs = cornerCursor;
+    return 0 == fclose(file);
 }
 
 std::string defaultOutputPath(const std::string& input)
@@ -939,17 +1045,16 @@ int main(int argc, char** argv)
             ++nonQuads;
     }
 
+    const std::vector<AutoRemesher::Vector2>& vertexUvs = remesher.remeshedVertexUvs();
     const std::vector<std::vector<AutoRemesher::Vector2>>& faceUvs = remesher.remeshedFaceUvs();
-    const bool hasUvs = faceUvs.size() == remesher.remeshedQuads().size() && !faceUvs.empty();
-    size_t uvCorners = 0;
-    for (const auto& quadUvs : faceUvs)
-        uvCorners += quadUvs.size();
     std::vector<AutoRemesher::Vector3> normals;
     if (options.writeNormals)
         normals = computeVertexNormals(remesher.remeshedVertices(), remesher.remeshedQuads());
 
+    std::string uvMode = "none";
+    size_t uvCorners = 0;
     if (!writeObj(options.output, remesher.remeshedVertices(), remesher.remeshedQuads(),
-            faceUvs, normals, &error)) {
+            vertexUvs, faceUvs, normals, options.uvMode, &uvMode, &uvCorners, &error)) {
         if (options.json)
             emitLine(errorEvent(error));
         fprintf(stderr, "error: %s\n", error.c_str());
@@ -998,7 +1103,8 @@ int main(int argc, char** argv)
                 << ",\"facesAdded\":" << holes.facesAdded << "}"
                 << ",\"patches\":{\"kept\":" << patches.kept
                 << ",\"dropped\":" << patches.dropped << "}"
-                << ",\"uvs\":" << (hasUvs ? "true" : "false")
+                << ",\"uvs\":" << (uvMode != "none" ? "true" : "false")
+                << ",\"uvMode\":\"" << uvMode << "\""
                 << ",\"uvCorners\":" << uvCorners
                 << ",\"symmetry\":{\"axis\":\"" << symmetryAxisName(options.symmetryAxis) << "\""
                 << ",\"seamVertices\":" << symmetry.seamVertices
@@ -1020,8 +1126,9 @@ int main(int argc, char** argv)
         printf("  topology: %zu boundary edge(s) in %zu loop(s), %zu non-manifold edge(s), %zu component(s)\n",
             outputStats.boundaryEdges, outputStats.boundaryLoops,
             outputStats.nonManifoldEdges, outputStats.components);
-        printf("  uv: %s (%zu corners), normals: %s\n",
-            hasUvs ? "yes" : "none", uvCorners, normals.empty() ? "no" : "yes");
+        printf("  uv: %s (%zu vt, %s), normals: %s\n",
+            uvMode != "none" ? "yes" : "none", uvCorners, uvMode.c_str(),
+            normals.empty() ? "no" : "yes");
         if (options.symmetryAxis > 0) {
             printf("  symmetry: %s=%.6g, %zu seam vertices, %zu faces cut, %zu mirrored (%zu -> %zu verts)\n",
                 symmetryAxisName(options.symmetryAxis), symmetry.plane, symmetry.seamVertices,

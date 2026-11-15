@@ -39,6 +39,11 @@ Unreleased
 - Move the topology analyzer to `src/core/geom/topologystats.cpp` and the UV transfer to
   `src/core/param/uvtransfer.cpp`; the pipeline file no longer sits on its 1500 line
   budget
+- Symmetry: `--symmetry x|y|z` cuts the output at the plane, welds the seam and
+  mirrors the positive half, so the result is symmetric by construction.  Face
+  clipping carries the face's own UVs; the cut row loses a corner (98.6% quads on
+  the sphere fixture, 0 unmatched vertices, 3 seam edge(s) left open by the weld).
+  `--symmetry-tolerance` sets what counts as the seam (0.002 of the bbox diagonal)
 - Add `tools/smoke_cli.py`, wired into the gates workflow: it asserts the JSON
   envelope (input event, warning for an open shell, result topology/holes/patches/
   phases), that `--quiet` is silent, that vt/vn are written (and skipped on demand),

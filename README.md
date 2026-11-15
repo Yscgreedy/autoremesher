@@ -85,6 +85,10 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
                               <input>_remeshed.obj)
       --no-uv                 do not write vt lines
       --no-normals            do not write vn lines
+      --symmetry AXIS         x | y | z: cut the output at that plane and mirror the
+                              positive half onto the negative one (default off)
+      --symmetry-tolerance F  how close to the plane counts as the seam, as a
+                              fraction of the bbox diagonal (default 0.002)
   -q, --target-quads N        requested quad count (default 20000); the cover
                               scale is solved from this budget, so the result
                               lands within about ±5%
@@ -117,6 +121,14 @@ through the chart under its centroid, so a cover seam falls between faces rather
 through them; islands are laid out side by side in UV space and the whole set is
 normalized into the unit square. A face whose chart is degenerate falls back to its own
 planar frame. Normals are area weighted and smooth.
+
+`--symmetry x|y|z` produces a symmetric result instead of hoping for one: the quad
+mesh is cut at the plane (Sutherland-Hodgman on each face, carrying its UVs), the seam
+vertices are welded, and the positive half is mirrored onto the negative one. The
+result is symmetric by construction - verified on the sphere fixture with zero
+unmatched vertices - at the price of one row of faces along the seam losing a corner
+(98.6% quads on that fixture vs 100% before). The plane is always the coordinate
+plane through the origin.
 
 The CLI reports what it decided, not just how long it took: input topology (boundary
 edges and loops, non-manifold edges, components, degenerate faces) is counted before

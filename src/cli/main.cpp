@@ -131,6 +131,8 @@ struct Options {
     int threads = 0;
     bool writeUvs = true;
     bool writeNormals = true;
+    int symmetryAxis = 0; // 0 off, 1 x=0, 2 y=0, 3 z=0
+    double symmetryTolerance = 0.002;
     int logLevel = 1; // 0 = silent, 1 = normal, 2 = debug (core Log::Level order)
     bool json = false;
     bool progress = false;
@@ -196,6 +198,11 @@ const char* kUsage =
     "  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)\n"
     "      --no-uv                 do not write vt lines\n"
     "      --no-normals            do not write vn lines\n"
+    "      --symmetry AXIS         x | y | z: snap the output onto its own mirror\n"
+    "                              plane where both sides agree, and count where\n"
+    "                              they do not (default off)\n"
+    "      --symmetry-tolerance F  pairing tolerance as a fraction of the bbox\n"
+    "                              diagonal (default 0.002)\n"
     "\n"
     "Remeshing:\n"
     "  -q, --target-quads N        requested quad count (default 20000); the\n"
@@ -337,6 +344,23 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->localRemesh = true;
         } else if (arg == "--threads") {
             options->threads = static_cast<int>(number());
+        } else if (arg == "--symmetry") {
+            const std::string axis = value();
+            if (axis == "x" || axis == "X")
+                options->symmetryAxis = 1;
+            else if (axis == "y" || axis == "Y")
+                options->symmetryAxis = 2;
+            else if (axis == "z" || axis == "Z")
+                options->symmetryAxis = 3;
+            else if (axis.empty() || axis == "none" || axis == "off")
+                options->symmetryAxis = 0;
+            else {
+                fprintf(stderr, "unknown symmetry axis '%s' (x|y|z|none)\n", axis.c_str());
+                *exitCode = 1;
+                return false;
+            }
+        } else if (arg == "--symmetry-tolerance") {
+            options->symmetryTolerance = number();
         } else if (arg == "--no-uv") {
             options->writeUvs = false;
         } else if (arg == "--no-normals") {
@@ -739,6 +763,20 @@ void reportInputHealth(const Options& options, const AutoRemesher::TopologyStats
     }
 }
 
+const char* symmetryAxisName(int axis)
+{
+    switch (axis) {
+    case 1:
+        return "x";
+    case 2:
+        return "y";
+    case 3:
+        return "z";
+    default:
+        return "none";
+    }
+}
+
 void reportTargetHealth(const Options& options, size_t requested, size_t actual,
     const AutoRemesher::HoleStats& holes)
 {
@@ -837,6 +875,8 @@ int main(int argc, char** argv)
     remesher.setProjectedHoleCaps(options.projectedCaps);
     remesher.setLocalRemesh(options.localRemesh);
     remesher.setExportUvs(options.writeUvs);
+    remesher.setSymmetryAxis(options.symmetryAxis);
+    remesher.setSymmetryTolerance(options.symmetryTolerance);
     // --verbose prints the report itself below, so the library must not print it
     // a second time; --quiet suppresses it entirely.
     remesher.setReportEnabled(!options.quiet && !options.verbose);
@@ -921,6 +961,8 @@ int main(int argc, char** argv)
 
     reportTargetHealth(options, options.targetQuads, quads, remesher.holeStats());
 
+    const AutoRemesher::AutoRemesher::SymmetryStats& symmetry = remesher.symmetryStats();
+
     const double quadsError = (options.targetQuads > 0)
         ? ((double)quads - (double)options.targetQuads) / (double)options.targetQuads
         : 0.0;
@@ -952,6 +994,13 @@ int main(int argc, char** argv)
                 << ",\"dropped\":" << patches.dropped << "}"
                 << ",\"uvs\":" << (hasUvs ? "true" : "false")
                 << ",\"uvCorners\":" << uvCorners
+                << ",\"symmetry\":{\"axis\":\"" << symmetryAxisName(options.symmetryAxis) << "\""
+                << ",\"seamVertices\":" << symmetry.seamVertices
+                << ",\"clippedFaces\":" << symmetry.clippedFaces
+                << ",\"mirroredFaces\":" << symmetry.mirroredFaces
+                << ",\"verticesBefore\":" << symmetry.verticesBefore
+                << ",\"verticesAfter\":" << symmetry.verticesAfter
+                << ",\"tolerance\":" << std::setprecision(6) << symmetry.tolerance << "}"
                 << ",\"normals\":" << (normals.empty() ? "false" : "true")
                 << ",\"phases\":" << phasesJson(remesher.phaseTimings())
                 << "}";
@@ -966,6 +1015,12 @@ int main(int argc, char** argv)
             outputStats.nonManifoldEdges, outputStats.components);
         printf("  uv: %s (%zu corners), normals: %s\n",
             hasUvs ? "yes" : "none", uvCorners, normals.empty() ? "no" : "yes");
+        if (options.symmetryAxis > 0) {
+            printf("  symmetry: %s=0, %zu seam vertices, %zu faces cut, %zu mirrored (%zu -> %zu verts)\n",
+                symmetryAxisName(options.symmetryAxis), symmetry.seamVertices,
+                symmetry.clippedFaces, symmetry.mirroredFaces,
+                symmetry.verticesBefore, symmetry.verticesAfter);
+        }
         if (holes.filled > 0 || holes.ignored > 0 || patches.dropped > 0) {
             printf("  holes: %zu filled, %zu left open (+%zu faces); patches: %zu kept, %zu dropped\n",
                 holes.filled, holes.ignored, holes.facesAdded, patches.kept, patches.dropped);

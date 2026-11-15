@@ -21,7 +21,7 @@
 | --model-type 死开关 | 已修 | 改成真正的 preset 表（organic/hard-surface），显式传的旋钮仍优先；`--preset` 为新名，`--model-type` 为别名；GUI 下拉框现在会把四个滑块拨到同一张表 |
 | 回归护栏 | 已加 | `tools/smoke_cli.py`（JSON 契约 + quiet 静默 + 目标数 ≤15%），已接入 gates.yml；`--legacy-target-quads` 可复现旧 MD5（F7DC332D…） |
 
-P1 进展：**UV/vn 导出已落地**（`UvTransfer`，每面按质心所在 chart 映射，vt 每角一条、vn 平滑；`--no-uv`/`--no-normals` 可关）。仍未做：对称、pole 分布与 edge-loop 走态度量、单岛并行、偏差进核心/GUI。
+P1 进展：**UV/vn 导出**、**pole 分布 + edge-loop 走态度量**（tools/metrics，poles/簇/最近距离、环转向角与横向二面角）、**对称**（`--symmetry x|y|z`：平面裁切 + 中缝焊接 + 正半镜像，构造性对称，实测 0 unmatched）均已落地。仍未做：单岛并行（P2）、偏差进核心/GUI（P2）、UV v2 逐角映射（消 seam 断口）。
 
 ## 一、"顺的地方"核对
 

@@ -7,7 +7,6 @@
     "pipeline": 13
   },
   "r8_exempt_files": {
-    "src/core/extract/quadextractor.cpp": 6392,
-    "src/core/pipeline/autoremesher.cpp": 1638
+    "src/core/extract/quadextractor.cpp": 6392
   }
 }

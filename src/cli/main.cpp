@@ -967,7 +967,7 @@ int main(int argc, char** argv)
 
     reportTargetHealth(options, options.targetQuads, quads, remesher.holeStats());
 
-    const AutoRemesher::AutoRemesher::SymmetryStats& symmetry = remesher.symmetryStats();
+    const AutoRemesher::SymmetryStats& symmetry = remesher.symmetryStats();
 
     const double quadsError = (options.targetQuads > 0)
         ? ((double)quads - (double)options.targetQuads) / (double)options.targetQuads

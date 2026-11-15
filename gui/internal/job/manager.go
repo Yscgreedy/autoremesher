@@ -48,6 +48,8 @@ type Result struct {
 	Quads     int     `json:"quads"`
 	NonQuads  int     `json:"nonQuads"`
 	Triangles int     `json:"triangles"`
+	// Deviation is present when the run asked for it (--deviation).
+	Deviation *Deviation `json:"deviation,omitempty"`
 }
 
 // Snapshot is a point in time view of a job.
@@ -198,6 +200,7 @@ func (j *Job) publish(ev Event) {
 			Quads:     ev.Quads,
 			NonQuads:  ev.NonQuads,
 			Triangles: ev.Triangles,
+			Deviation: ev.Deviation,
 		}
 	case "error":
 		j.errMsg = ev.Message

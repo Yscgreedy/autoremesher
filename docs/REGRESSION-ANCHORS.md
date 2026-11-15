@@ -1,59 +1,76 @@
-# 回归锚点（master 现值，2026-11-13 实测）
+# 回归锚点（master 现值，2026-11-15 整体回归）
 
-> 机读版本：[regression-anchors.json](regression-anchors.json)（同一份数据，逐用例含全部 5 次 sha）。
-> 这份文件替代 arch-refactor 计划 §1.2 那组 `8101 / 9982 / 4720` 的数字：那是在 arch 侧 core 上测的，master 的 perf 改动（quadextractor 增量邻接、singularitysimplifier 复用 scratch、quadparameterizer 重写）已经让它们漂移了，实测 `body_vox` 现在是 **7961 quads / 92 non-quads / 1 component**。硬抄旧值当基线的人会得出「回归」的假结论。
+> 机读版本：[regression-anchors.json](regression-anchors.json)。
+
+## 0. 这一版为什么又变了（先读这段）
+
+2026-11-15 的整体回归结论：**几何没有回归**。
+
+- `body_vox`、`body_clean` 的**几何通道**（`v` 行 + `f` 的顶点索引）与 UV v2 之前的锚点输出**逐字节一致**；
+- `head_in` 的几何在同一二进制下 5 次里有 2 种取值，逐点最大差 **4.4e-16**（TBB 归约顺序，老问题）；
+- 整文件 sha 变了，因为 **UV 通道变了**：UV v2 之后 vt 的取值与条数都不同（per-corner → 每面 chart，规范化口径也改了）。
+
+所以锚点现在记**两个判据**：
+
+| 判据 | 用途 |
+| --- | --- |
+| `geometry_mode_sha256` | **真正的回归判据**：几何一变就是回归 |
+| `mode_sha256`（整文件） | 变更 UV/法线写出方式时会变，属于"需要显式重生成锚点"的变更，不是回归 |
 
 ## 1. 怎么测的
 
 ```bash
-# 输入不在仓库里（140 MB），路径按需替换
 IN=E:/ComfyUI-aki-v3/zcode_work/char3d/remesh
-BIN=build/cli/dist/autoremesher.exe     # cmake -S . -B build/cli -DCMAKE_BUILD_TYPE=Release
+BIN=build/cli/dist/autoremesher.exe
 for i in 1 2 3 4 5; do
-  "$BIN" --input "$IN/body_vox.obj" --output /tmp/anchors/body_vox.r$i.obj \
+  "$BIN" --input "$IN/body_vox.obj" --output /tmp/anch/body_vox.r$i.obj \
     --target-quads 15000 --sharp-edge 60 --adaptivity 0.3
 done
-sha256sum /tmp/anchors/body_vox.r*.obj
 ```
 
-每个用例跑 **5 次**，记录 sha256、字节数、面数。之所以要 5 次而不是 1 次：见 §3。
+默认参数即被测行为：exact 目标数、`--uv-mode corner`、vt/vn 都写。
 
 ## 2. 锚点
 
-| case | flags | input sha256 | output sha256 (mode) | quads | non-quads | distinct sha / 5 runs | bytes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `body_vox` | `--target-quads 15000 --sharp-edge 60 --adaptivity 0.3` | `8f04aa7772ade54f…` | `898e2881a6ac1a1e…` | 7961 | 92 | 1 | 701942 |
-| `body_clean` | `--target-quads 15000 --sharp-edge 60 --adaptivity 0.3 --anisotropy 1` | `6df100080ef8f862…` | `876092b1e07d7681…` | 10131 | 74 | 1 | 890888 |
-| `head_in` | `--target-quads 10000 --sharp-edge 60 --adaptivity 0.5 --anisotropy 1` | `86684c0ccbf8a576…` | `bf0a28677bc1c89b…` | 4718 | 389 | 2 | 455748..455750 |
+| case | flags | faces | quads | vertices | vt | vn | 整文件 sha（命中） | 几何 sha |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `body_vox` | `--target-quads 15000 --sharp-edge 60 --adaptivity 0.3` | 15445 | 15351 | 15481 | 61856 | 15481 | `54160deab29f7f79…`（5/5） | `96ec7580cde4f100…`（1 种） |
+| `body_clean` | 同上 + `--anisotropy 1` | 15567 | 15503 | 15577 | 62318 | 15577 | `b0edc826b9fe7095…`（5/5） | `4489568b7cc4bdf8…`（1 种） |
+| `head_in` | `--target-quads 10000 --sharp-edge 60 --adaptivity 0.5 --anisotropy 1` | 10470 | 10032 | 10717 | 42106 | 10717 | `256c58080c39c3da…`（4/5，2 种） | `ff1928359906db02…`（2 种，差 ≤4.4e-16） |
 
-结构字段（`tools/metrics/mesh_metrics.py measure --ref <输入>`，body_vox @15000 实测）：
+耗时（同一台机器、单跑）：body_vox ≈ 5.3 s，body_clean ≈ 6.0 s，head_in ≈ 7.8 s。
 
-| 字段 | 值 |
+## 3. 结构/质量基线（`tools/metrics/mesh_metrics.py`）
+
+| case | 四边面率 | n-gon | 非流形边 | 边界环 | 分量 | valence4 | 偏差 p95(rel) | 覆盖率 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `body_vox` | 99.39% | 85 | 8 | 0 | 1 | 96.89% | 8.86e-4 | 98.22% |
+| `body_clean` | 99.59% | 57 | 20 | 0 | 1 | 97.83% | — | — |
+| `head_in` | 95.82% | 332 | 48 | 1 | 82 | 81.61% | 2.26e-3 | 77.03% |
+
+`head_in` 是刻意保留的脏输入（82 个分量、1 条边界环），数字低是输入本身的问题，不是回归；它的价值在于稳定的结构字段。
+
+## 4. 判定规则
+
+| 场景 | 判据 |
 | --- | --- |
-| `quads` | 7961 |
-| `non_quad_faces` | 92 |
-| `components` | 1 |
-| `components_largest_face_ratio` | 1.0 |
-| `edges_non_manifold` | 4 |
-| `boundary_loops` | 0 |
-| `degenerate_faces` | 4 |
-| `valence4_ratio` | 95.07 % |
-| `deviation_p95`（对输入） | 0.000939 |
-| `coverage`（对输入） | 96.39 % |
+| 任何几何/数值改动 | `geometry_mode_sha256` 对得上 → 通过；body_vox/body_clean 任一几何 sha 变化即回归 |
+| 只改 UV/法线写出 | 整文件 sha 会变：确认顶点/面计数与几何 sha 不变后，重生成本文档 |
+| `head_in` | 几何 sha 取众数即可；那 2 种取值相差 ≤4.4e-16，别单次判红 |
 
-## 3. 判定规则（为什么不能所有用例都比 sha）
+## 5. 与 1.2.0 输出的关系（已验证）
 
-| 用例 | 判据 | 理由 |
-| --- | --- | --- |
-| `body_vox` | **逐字节**：等于 `898e2881…` | 5/5 稳定（单连通分量） |
-| `body_clean` | **逐字节**：等于 `876092b1…` | 5/5 稳定 |
-| `head_in` | **结构 + 众数**：quads 4718 / non-quads 389 / faces 5107 必须相等；sha 取众数 `bf0a2867…`，出现 2 个不同 sha 属正常 | 70 个连通分量，TBB 并行归约顺序会让 4 行顶点坐标的最后 1~2 位有效数字漂移（455748 ↔ 455750 B）。**master 自己的二进制单独跑就能复现两种值**，不是哪个改动引入的 |
+`--legacy-target-quads --no-uv --no-normals` 仍逐字节复现 1.2.0：
 
-任何一次结构改动之后：先跑 `body_vox`/`body_clean` 比 sha，二者不等就是真回归；`head_in` 只看结构字段与 sha 众数，别拿单次 sha 当判据。
+```text
+body_vox   898e2881a6ac1a1e…
+body_clean 876092b1e07d7681…
+head_in    bf0a28677bc1c89b…
+```
 
-## 4. 明确的坑
+## 6. 明确的坑
 
-1. **别用 arch 计划 §1.2 的数字**（8101 / 9982 / 4720）：口径与现值都不同，且那组值本身是「某次基线快照」，不是常量。
-2. **`head_in` 不要比单次 sha**：会造成假红。要更强判定就用 `mesh_metrics.py compare` 的容差（见 `tools/metrics/README.md`）。
-3. **输入文件不在仓库**：`artifacts/`（140 MB）刻意不提交，锚点只记录输入的 sha256，不复现输入本身。
-4. **默认参数 ≠ 锚点参数**：CLI 默认 `--target-quads 20000 / --sharp-edge 60 / --adaptivity 0.5`，上表用的是显式参数；写基线脚本时把参数抄全。
+1. 整文件 sha ≠ 几何回归判据（见 §0）。
+2. 对比几何时用 `--no-uv --no-normals`。
+3. 输入不在仓库（140 MB），锚点只记录 sha256。
+4. `--exact-target-quads` 现在是默认；写基线脚本时不要再叠加它，也不要期待旧的四边数。

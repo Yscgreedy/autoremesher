@@ -42,6 +42,9 @@ type Params struct {
 	ProjectedCaps      bool    `json:"projectedCaps"`
 	LocalRemesh        bool    `json:"localRemesh"`
 	EdgeScaling        float64 `json:"edgeScaling"`
+	// Deviation asks the CLI to measure how far the output sits from the input
+	// surface; the panel shows mean/p95/max when it comes back.
+	Deviation bool `json:"deviation"`
 }
 
 // DefaultParams mirrors the defaults table of the CLI contract.
@@ -55,6 +58,12 @@ func DefaultParams() Params {
 		ModelType:    ModelOrganic,
 		Threads:      0,
 		EdgeScaling:  1.0,
+		// The default path lands anywhere from 0.7x to 1.05x of the requested
+		// count; the exact solve keeps it within about +/-5%, which is the
+		// number a GUI slider implies.  The CLI flag stays opt-in so scripts
+		// keep the historical output byte for byte.
+		ExactTargetQuads: true,
+		Deviation:        true,
 	}
 }
 
@@ -255,6 +264,9 @@ func (p Params) Args(inputPath, outputPath string) []string {
 		"--keep-island-fraction", formatFloat(p.KeepIslandFraction),
 		"--model-type", p.ModelType,
 		"--threads", strconv.Itoa(p.Threads),
+	}
+	if p.Deviation {
+		args = append(args, "--deviation")
 	}
 	if p.ExactTargetQuads {
 		args = append(args, "--exact-target-quads")

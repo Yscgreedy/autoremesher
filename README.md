@@ -81,24 +81,80 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
 
 ```
   -i, --input PATH            input OBJ (polygons are triangulated)
-  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)
-  -q, --target-quads N        requested quad count (default 20000)
+  -o, --output PATH           output OBJ of quads with vt and vn (default:
+                              <input>_remeshed.obj)
+      --deviation             measure the output's distance to the input surface
+                              (mean/p95/max, exact point-triangle)
+      --uv-mode M             corner | vertex | hybrid | seam (default corner)
+      --no-uv                 do not write vt lines
+      --no-normals            do not write vn lines
+      --symmetry AXIS         x | y | z: cut the output at that plane and mirror the
+                              positive half onto the negative one (default off)
+      --symmetry-plane F      coordinate of the mirror plane along the axis
+                              (default 0, the coordinate plane)
+      --symmetry-tolerance F  how close to the plane counts as the seam, as a
+                              fraction of the bbox diagonal (default 0.002)
+  -q, --target-quads N        requested quad count (default 20000); the cover
+                              scale is solved from this budget, so the result
+                              lands within about ±5%
       --adaptivity F          gradient adaptivity 0..1 (default 0.5)
       --anisotropy F          anisotropy 0..1 (default 0.0)
       --sharp-edge DEG        sharp edge threshold (default 60)
       --smooth-normal DEG     smooth normal threshold (default 0)
       --edge-scaling F        edge scale multiplier (default 1.0)
-      --model-type T          organic | hard-surface
-      --exact-target-quads    solve the cover scale from the quad budget
+      --preset P              organic | hard-surface: fills every knob the command
+                              line did not name (default organic)
+      --model-type T          alias of --preset
+      --exact-target-quads    solve the cover scale from the quad budget (default)
+      --legacy-target-quads   take the scale from the average edge length instead,
+                              which lands around 0.7N..1.05N
       --keep-island-fraction F, --keep-all-islands, --weld-patches,
       --legacy-holes, --projected-caps, --local-remesh, --threads N
-      --json                  JSON-lines events on stdout (for the GUI)
+      --json                  JSON-lines events on stdout (for the GUI); result
+                              carries topology, holes, patches and phase timings
+      --log-level L           quiet | normal | debug
       --progress              progress on stderr
       --verbose               per-phase report
       --quiet, --version, --help
 ```
 
 Exit codes: `0` success, `1` usage/input error, `2` remeshing failed, `3` write failed.
+
+Output format: quad (and occasional n-gon) faces, with `vt` and one `vn` per vertex.
+`--uv-mode` picks which UV channel is written: `corner` (default) takes one UV per face
+corner from the cover chart under that face - correct where the cover has charts, but a
+seam sits between every pair of faces; `vertex` writes the extractor's own per-vertex
+UVs, continuous across any two faces that share a vertex, but a face whose corners come
+from different charts stretches across the seam; `hybrid` writes vertex UVs and falls
+back to per-corner UVs only for the faces where the two channels disagree on area;
+`seam` cuts the mesh along its UV chart boundaries (one vertex cannot carry two UVs) and
+writes one UV per vertex, so faces inside a chart stay connected and the seam appears
+exactly where the cover has one - on the 12k sphere that costs 22 extra vertices.
+Measured on the 12k sphere: corner p99/p50 UV-area ratio 3.7 with 0 degenerate faces,
+vertex 62 with 9, hybrid 3.4 with 2, seam 1.41 with 0. On a pathological 17,958-shell
+input the vertex channel is worse than corner (2,577 degenerate faces vs 38) and seam is
+in between, which is why corner stays the default. `--symmetry` disables seam splitting
+(the cut would be re-welded into open edges) and says so in a warning. The UVs are the island's own parameterization, mapped onto each quad
+through the chart under its centroid, so a cover seam falls between faces rather than
+through them; islands are laid out side by side in UV space and the whole set is
+normalized into the unit square. A face whose chart is degenerate falls back to its own
+planar frame. Normals are area weighted and smooth.
+
+`--symmetry x|y|z` produces a symmetric result instead of hoping for one: the quad
+mesh is cut at the plane (Sutherland-Hodgman on each face, carrying its UVs), the seam
+vertices are welded, and the positive half is mirrored onto the negative one. The
+result is symmetric by construction - verified on the sphere fixture with zero
+unmatched vertices - at the price of one row of faces along the seam losing a corner
+(98.6% quads on that fixture vs 100% before). The plane sits at 0 by default;
+`--symmetry-plane` moves it, which is what a model that is not centred on the origin
+needs (verified on a sphere shifted by 0.25: every vertex has an exact mirror partner,
+seam welded, zero open edges).
+
+The CLI reports what it decided, not just how long it took: input topology (boundary
+edges and loops, non-manifold edges, components, degenerate faces) is counted before
+the run and surfaced as warnings, and the result carries the output topology, how many
+holes were filled or left open, how many extracted patches were kept or dropped, and a
+machine readable copy of the phase report.
 The machine protocol (event shapes, throttling, error semantics) is documented in
 [docs/cli-protocol.md](docs/cli-protocol.md).
 

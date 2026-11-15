@@ -98,6 +98,18 @@ func TestParserFlushesPendingProgressOnResult(t *testing.T) {
 	}
 }
 
+func TestParserReadsDeviation(t *testing.T) {
+	p := NewParser()
+	now := time.Unix(0, 0)
+	evs := p.Line(`{"type":"result","output":"o.obj","seconds":1.5,"vertices":10,"quads":8,"nonQuads":0,"triangles":4,"deviation":{"samples":10,"unresolved":0,"mean":0.0012,"p50":0.0008,"p95":0.0034,"max":0.0056}}`, now)
+	if len(evs) != 1 || evs[0].Deviation == nil {
+		t.Fatalf("deviation not parsed: %+v", evs)
+	}
+	if evs[0].Deviation.P95 != 0.0034 || evs[0].Deviation.Samples != 10 {
+		t.Fatalf("deviation values wrong: %+v", *evs[0].Deviation)
+	}
+}
+
 func TestParserHandlesMalformedAndUnknownLines(t *testing.T) {
 	p := NewParser()
 	now := time.Unix(0, 0)

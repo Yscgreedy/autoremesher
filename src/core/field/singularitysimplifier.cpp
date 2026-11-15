@@ -20,6 +20,7 @@
  *  SOFTWARE.
  */
 #include <AutoRemesher/SingularitySimplifier>
+#include <core/base/logging.h>
 
 #include <algorithm>
 #include <cmath>
@@ -145,9 +146,13 @@ std::vector<int> SingularitySimplifier::vertexCharges() const
     if (verifyCharges) {
         const std::vector<int> reference = vertexChargesUncached();
         for (size_t v = 0; v < reference.size() && v < result.size(); ++v)
-            if (reference[v] != result[v])
-                fprintf(stderr, "charge mismatch at %zu: incremental %d reference %d\n",
+            if (reference[v] != result[v]) {
+                char trace[256];
+                snprintf(trace, sizeof(trace),
+                    "charge mismatch at %zu: incremental %d reference %d\n",
                     v, result[v], reference[v]);
+                Log::write(Log::Normal, trace);
+            }
     }
     return result;
 }

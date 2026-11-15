@@ -2,15 +2,20 @@
 # Re-run: python tools/gen_sources.py
 set(AUTOREMESHER_CORE_MODULE_SOURCES
     "src/core/base/positionkey.cpp"
+    "src/core/geom/deviation.cpp"
     "src/core/geom/meshseparator.cpp"
     "src/core/geom/surfacemesh.cpp"
+    "src/core/geom/topologystats.cpp"
     "src/core/numeric/constrainedleastsquares.cpp"
     "src/core/numeric/mixedintegerleastsquares.cpp"
     "src/core/field/framefield.cpp"
     "src/core/field/singularitysimplifier.cpp"
     "src/core/cover/quadparameterizer.cpp"
     "src/core/param/parameterizer.cpp"
+    "src/core/param/uvcharts.cpp"
+    "src/core/param/uvtransfer.cpp"
     "src/core/extract/quadextractor.cpp"
     "src/core/pipeline/autoremesher.cpp"
     "src/core/pipeline/isotropicremesher.cpp"
+    "src/core/pipeline/meshsymmetry.cpp"
 )

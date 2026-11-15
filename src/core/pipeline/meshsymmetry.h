@@ -35,12 +35,12 @@ namespace AutoRemesher {
 struct SymmetryStats {
     int axis = 0;
     size_t seamVertices = 0;
-    size_t clippedFaces = 0;   // faces the plane cut in two
-    size_t mirroredFaces = 0;  // faces added by the mirror
+    size_t clippedFaces = 0; // faces the plane cut in two
+    size_t mirroredFaces = 0; // faces added by the mirror
     size_t verticesBefore = 0;
     size_t verticesAfter = 0;
-    double plane = 0.0;        // coordinate of the mirror plane along the axis
-    double tolerance = 0.0;    // how close to the plane counts as on the seam
+    double plane = 0.0; // coordinate of the mirror plane along the axis
+    double tolerance = 0.0; // how close to the plane counts as on the seam
 };
 
 struct SymmetryResult {

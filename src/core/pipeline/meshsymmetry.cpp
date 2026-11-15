@@ -20,9 +20,9 @@
  *  SOFTWARE.
  */
 #include <AutoRemesher/MeshSymmetry>
-#include <core/base/logging.h>
 #include <algorithm>
 #include <cmath>
+#include <core/base/logging.h>
 #include <map>
 #include <unordered_map>
 
@@ -346,8 +346,7 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
     if (keepVertexUvs && keptVertexUvs.size() == result.vertices.size())
         result.vertexUvs = std::move(keptVertexUvs);
     if (keepVertexUvs && keptVertexUvs.size() != result.vertices.size())
-        Log::write(Log::Debug, "symmetry uv bookkeeping lost: " + std::to_string(keptVertexUvs.size())
-                + " uv(s) for " + std::to_string(result.vertices.size()) + " vertices\n");
+        Log::write(Log::Debug, "symmetry uv bookkeeping lost: " + std::to_string(keptVertexUvs.size()) + " uv(s) for " + std::to_string(result.vertices.size()) + " vertices\n");
     for (size_t i = 0; i < result.vertices.size(); ++i) {
         if (result.vertices[i][axis] == plane)
             ++stats.seamVertices;

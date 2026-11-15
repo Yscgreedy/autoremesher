@@ -22,12 +22,12 @@
 #include <AutoRemesher/ConstrainedLeastSquares>
 #include <AutoRemesher/FrameField>
 #include <AutoRemesher/Parameterizer>
-#include <core/base/logging.h>
 #include <AutoRemesher/QuadParameterizer>
 #include <AutoRemesher/SingularitySimplifier>
 #include <AutoRemesher/SurfaceMesh>
 #include <algorithm>
 #include <cmath>
+#include <core/base/logging.h>
 #include <iostream>
 #include <limits>
 #include <map>

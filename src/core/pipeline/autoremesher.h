@@ -26,9 +26,9 @@
 #include <AutoRemesher/Progress>
 #include <AutoRemesher/TopologyStats>
 #include <AutoRemesher/Vector3>
-#include <core/geom/topologystats.h>
 #include <atomic>
 #include <chrono>
+#include <core/geom/topologystats.h>
 #include <cstddef>
 #include <cstdint>
 #include <map>

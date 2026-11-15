@@ -26,8 +26,8 @@
 #include <axisalignedboundingboxtree.h>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <map>
+#include <memory>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -74,13 +74,13 @@ public:
     //   - holesIgnored is reset by every pass, so it reports the holes that were
     //     still open when the last pass returned.
     struct ExtractionStats {
-        size_t holesFilled = 0;      // holes (loops) actually filled on the final mesh
-        size_t holesIgnored = 0;     // holes skipped (too long / no projected caps)
-        size_t holeFacesAdded = 0;   // faces created by hole filling
-        size_t patchesKept = 0;      // extracted patches kept for this island
-        size_t patchesDropped = 0;   // patches thrown away
-        size_t boundaryLoops = 0;    // output boundary loops, if cheap to compute
-        size_t openEdges = 0;        // output open (boundary) edges
+        size_t holesFilled = 0; // holes (loops) actually filled on the final mesh
+        size_t holesIgnored = 0; // holes skipped (too long / no projected caps)
+        size_t holeFacesAdded = 0; // faces created by hole filling
+        size_t patchesKept = 0; // extracted patches kept for this island
+        size_t patchesDropped = 0; // patches thrown away
+        size_t boundaryLoops = 0; // output boundary loops, if cheap to compute
+        size_t openEdges = 0; // output open (boundary) edges
         size_t nonManifoldEdges = 0; // output non-manifold edges
     };
 

@@ -31,17 +31,17 @@ namespace AutoRemesher {
 
 namespace {
 
-struct EdgeCorner {
-    size_t face = 0;
-    size_t corner = 0;
-};
+    struct EdgeCorner {
+        size_t face = 0;
+        size_t corner = 0;
+    };
 
-double uvDistance(const Vector2& first, const Vector2& second)
-{
-    const double du = first.x() - second.x();
-    const double dv = first.y() - second.y();
-    return std::sqrt(du * du + dv * dv);
-}
+    double uvDistance(const Vector2& first, const Vector2& second)
+    {
+        const double du = first.x() - second.x();
+        const double dv = first.y() - second.y();
+        return std::sqrt(du * du + dv * dv);
+    }
 
 }
 

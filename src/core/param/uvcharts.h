@@ -41,7 +41,7 @@ struct ChartSplit {
     std::vector<std::vector<size_t>> faces;
     std::vector<Vector2> vertexUvs;
     size_t chartCount = 0;
-    size_t splitVertices = 0;   // vertices that had to be duplicated
+    size_t splitVertices = 0; // vertices that had to be duplicated
 };
 
 // faceUvs is one UV pair per face corner (same order as faces); a face without

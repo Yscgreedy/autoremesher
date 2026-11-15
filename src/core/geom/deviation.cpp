@@ -18,7 +18,8 @@
  *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
- */#include <AutoRemesher/Deviation>
+ */
+#include <AutoRemesher/Deviation>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -30,68 +31,68 @@ namespace AutoRemesher {
 
 namespace {
 
-struct CellKey {
-    int x = 0;
-    int y = 0;
-    int z = 0;
-    bool operator==(const CellKey& other) const
-    {
-        return x == other.x && y == other.y && z == other.z;
-    }
-};
+    struct CellKey {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        bool operator==(const CellKey& other) const
+        {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
 
-struct CellKeyHash {
-    size_t operator()(const CellKey& key) const
-    {
-        return ((size_t)(key.x * 73856093) ^ (size_t)(key.y * 19349663) ^ (size_t)(key.z * 83492791));
-    }
-};
+    struct CellKeyHash {
+        size_t operator()(const CellKey& key) const
+        {
+            return ((size_t)(key.x * 73856093) ^ (size_t)(key.y * 19349663) ^ (size_t)(key.z * 83492791));
+        }
+    };
 
-double closestPointOnTriangle(const Vector3& point,
-    const Vector3& a, const Vector3& b, const Vector3& c)
-{
-    const Vector3 ab = b - a;
-    const Vector3 ac = c - a;
-    const Vector3 ap = point - a;
-    const double d1 = Vector3::dotProduct(ab, ap);
-    const double d2 = Vector3::dotProduct(ac, ap);
-    if (d1 <= 0.0 && d2 <= 0.0)
-        return (point - a).lengthSquared();
-    const Vector3 bp = point - b;
-    const double d3 = Vector3::dotProduct(ab, bp);
-    const double d4 = Vector3::dotProduct(ac, bp);
-    if (d3 >= 0.0 && d4 <= d3)
-        return (point - b).lengthSquared();
-    const double vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
-        const double denom = d1 - d3;
-        const double v = (denom != 0.0) ? d1 / denom : 0.0;
-        return (point - (a + ab * v)).lengthSquared();
+    double closestPointOnTriangle(const Vector3& point,
+        const Vector3& a, const Vector3& b, const Vector3& c)
+    {
+        const Vector3 ab = b - a;
+        const Vector3 ac = c - a;
+        const Vector3 ap = point - a;
+        const double d1 = Vector3::dotProduct(ab, ap);
+        const double d2 = Vector3::dotProduct(ac, ap);
+        if (d1 <= 0.0 && d2 <= 0.0)
+            return (point - a).lengthSquared();
+        const Vector3 bp = point - b;
+        const double d3 = Vector3::dotProduct(ab, bp);
+        const double d4 = Vector3::dotProduct(ac, bp);
+        if (d3 >= 0.0 && d4 <= d3)
+            return (point - b).lengthSquared();
+        const double vc = d1 * d4 - d3 * d2;
+        if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+            const double denom = d1 - d3;
+            const double v = (denom != 0.0) ? d1 / denom : 0.0;
+            return (point - (a + ab * v)).lengthSquared();
+        }
+        const Vector3 cp = point - c;
+        const double d5 = Vector3::dotProduct(ab, cp);
+        const double d6 = Vector3::dotProduct(ac, cp);
+        if (d6 >= 0.0 && d5 <= d6)
+            return (point - c).lengthSquared();
+        const double vb = d5 * d2 - d1 * d6;
+        if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+            const double denom = d2 - d6;
+            const double w = (denom != 0.0) ? d2 / denom : 0.0;
+            return (point - (a + ac * w)).lengthSquared();
+        }
+        const double va = d3 * d6 - d5 * d4;
+        if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+            const double denom = (d4 - d3) + (d5 - d6);
+            const double w = (denom != 0.0) ? (d4 - d3) / denom : 0.0;
+            return (point - (b + (c - b) * w)).lengthSquared();
+        }
+        const double denom = va + vb + vc;
+        if (!(std::fabs(denom) > 0.0))
+            return (point - a).lengthSquared();
+        const double v = vb / denom;
+        const double w = vc / denom;
+        return (point - (a + ab * v + ac * w)).lengthSquared();
     }
-    const Vector3 cp = point - c;
-    const double d5 = Vector3::dotProduct(ab, cp);
-    const double d6 = Vector3::dotProduct(ac, cp);
-    if (d6 >= 0.0 && d5 <= d6)
-        return (point - c).lengthSquared();
-    const double vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
-        const double denom = d2 - d6;
-        const double w = (denom != 0.0) ? d2 / denom : 0.0;
-        return (point - (a + ac * w)).lengthSquared();
-    }
-    const double va = d3 * d6 - d5 * d4;
-    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
-        const double denom = (d4 - d3) + (d5 - d6);
-        const double w = (denom != 0.0) ? (d4 - d3) / denom : 0.0;
-        return (point - (b + (c - b) * w)).lengthSquared();
-    }
-    const double denom = va + vb + vc;
-    if (!(std::fabs(denom) > 0.0))
-        return (point - a).lengthSquared();
-    const double v = vb / denom;
-    const double w = vc / denom;
-    return (point - (a + ab * v + ac * w)).lengthSquared();
-}
 
 }
 

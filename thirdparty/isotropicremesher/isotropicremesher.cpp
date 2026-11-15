@@ -24,6 +24,19 @@
 #include <cmath>
 #include "isotropicremesher.h"
 #include "isotropichalfedgemesh.h"
+#if defined(__has_include)
+#if __has_include(<oneapi/tbb/blocked_range.h>)
+#include <oneapi/tbb/blocked_range.h>
+#include <oneapi/tbb/parallel_for.h>
+#else
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#endif
+#else
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#endif
+#include <unordered_map>
 
 IsotropicRemesher::~IsotropicRemesher()
 {
@@ -493,27 +506,53 @@ void IsotropicRemesher::projectVertices()
     const std::vector<std::vector<size_t>> *projTriangles = m_smoothTriangles.empty() ? m_triangles : &m_smoothTriangles;
     const std::vector<Vector3> *projNormals = m_smoothTriangleNormals.empty() ? m_triangleNormals : &m_smoothTriangleNormals;
 
+    // Snapshot first, project after.  The sequential version let a vertex see its
+    // neighbours as they were *after* they had been projected, so the result
+    // depended on the traversal order; reading a snapshot removes that dependence,
+    // which is both what makes the pass thread safe and what makes it deterministic
+    // at any thread count.  The one-ring walk reaches neighbours through halfedges,
+    // so their positions are looked up by pointer.
+    std::vector<IsotropicHalfedgeMesh::Vertex *> vertices;
+    std::vector<Vector3> positions;
+    // No vertexCount() on the halfedge mesh: the list is built once and the count
+    // is not on any hot path, so it is measured rather than stored.
+    vertices.reserve(4096);
+    positions.reserve(4096);
     for (IsotropicHalfedgeMesh::Vertex *vertex = m_halfedgeMesh->moveToNextVertex(nullptr);
             nullptr != vertex;
             vertex = m_halfedgeMesh->moveToNextVertex(vertex)) {
-        if (vertex->featured)
-            continue;
+        vertices.push_back(vertex);
+        positions.push_back(vertex->position);
+    }
+    std::unordered_map<const IsotropicHalfedgeMesh::Vertex *, size_t> indexOf;
+    indexOf.reserve(vertices.size() * 2);
+    for (size_t i = 0; i < vertices.size(); ++i)
+        indexOf[vertices[i]] = i;
+    const auto positionOf = [&positions, &indexOf](const IsotropicHalfedgeMesh::Vertex *vertex) {
+        const auto found = indexOf.find(vertex);
+        return indexOf.end() == found ? Vector3() : positions[found->second];
+    };
 
+    const auto projectOne = [&](size_t index) {
+        IsotropicHalfedgeMesh::Vertex *vertex = vertices[index];
+        if (vertex->featured)
+            return;
         const auto &startHalfedge = vertex->firstHalfedge;
         if (nullptr == startHalfedge)
-            continue;
+            return;
+        const Vector3 vertexPosition = positions[index];
 
         std::vector<AxisAlignedBoudingBox> rayBox(1);
         auto &box = rayBox[0];
-        box.update(vertex->position);
+        box.update(vertexPosition);
 
         IsotropicHalfedgeMesh::Halfedge *loopHalfedge = startHalfedge;
         do {
-            box.update(loopHalfedge->nextHalfedge->startVertex->position);
+            box.update(positionOf(loopHalfedge->nextHalfedge->startVertex));
             if (nullptr == loopHalfedge->oppositeHalfedge) {
                 loopHalfedge = startHalfedge;
                 do {
-                    box.update(loopHalfedge->previousHalfedge->startVertex->position);
+                    box.update(positionOf(loopHalfedge->previousHalfedge->startVertex));
                     loopHalfedge = loopHalfedge->previousHalfedge->oppositeHalfedge;
                     if (nullptr == loopHalfedge)
                         break;
@@ -545,7 +584,7 @@ void IsotropicRemesher::projectVertices()
                 (*projVertices)[triangle[2]]
             };
             Vector3 intersection;
-            if (Vector3::intersectSegmentAndPlane(vertex->position - segment, vertex->position + segment,
+            if (Vector3::intersectSegmentAndPlane(vertexPosition - segment, vertexPosition + segment,
                     trianglePositions[0],
                     (*projNormals)[it],
                     &intersection)) {
@@ -556,7 +595,7 @@ void IsotropicRemesher::projectVertices()
                 }
                 if (Vector3::dotProduct(normals[0], normals[1]) > 0 &&
                         Vector3::dotProduct(normals[0], normals[2]) > 0) {
-                    hits.push_back({intersection, (vertex->position - intersection).lengthSquared()});
+                    hits.push_back({intersection, (vertexPosition - intersection).lengthSquared()});
                 }
             }
         }
@@ -567,5 +606,18 @@ void IsotropicRemesher::projectVertices()
                 return first.second < second.second;
             })->first;
         }
+    };
+
+    // Each task writes only the vertex it was handed, and the tree query is const,
+    // so the only shared state is the read-only snapshot.
+    if (vertices.size() >= 512) {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, vertices.size(), 64),
+            [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t index = range.begin(); index != range.end(); ++index)
+                    projectOne(index);
+            });
+    } else {
+        for (size_t index = 0; index < vertices.size(); ++index)
+            projectOne(index);
     }
 }

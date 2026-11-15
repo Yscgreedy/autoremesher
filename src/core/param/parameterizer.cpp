@@ -410,7 +410,8 @@ bool Parameterizer::parameterize()
             &field, m_scaling, m_sharpEdgeDegrees, &cover,
             &faceScalingField, &faceScalingU, &faceScalingV,
             m_targetQuadCount,
-            coverProgress ? &coverProgress : nullptr)) {
+            coverProgress ? &coverProgress : nullptr,
+            nullptr, 0.955, m_maximumCoverAttempts, m_curlMode)) {
         Log::write(Log::Normal, "Quad cover solve failed\n");
         return false;
     }

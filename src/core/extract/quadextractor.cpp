@@ -24,10 +24,12 @@
 #include <algorithm>
 #include <axisalignedboundingbox.h>
 #include <axisalignedboundingboxtree.h>
+#include <chrono>
 #include <cmath>
 #include <core/base/logging.h>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -109,6 +111,23 @@ bool QuadExtractor::extract()
     const auto report = [this](float fraction, const char* name) {
         if (m_progressHandler)
             m_progressHandler(fraction, name);
+    };
+    // Which cleanup pass actually costs the time is not obvious from the outside:
+    // they all look like "walk the faces and reconnect a few".  With
+    // AR_TRACE_TOPO=1 each pass prints its own wall clock, so the optimisation
+    // effort goes where the seconds are instead of where the code is longest.
+    const bool traceTopologyCost = nullptr != getenv("AR_TRACE_TOPO");
+    const auto timedPass = [traceTopologyCost](const char* name, const std::function<void()>& pass) {
+        if (!traceTopologyCost) {
+            pass();
+            return;
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        pass();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now() - start)
+                                 .count();
+        Log::write(Log::Normal, "[topo] " + std::string(name) + ": " + std::to_string(elapsed / 1000.0) + " ms");
     };
 
     // The weld step is scale sensitive; honour the caller's step before any
@@ -288,18 +307,18 @@ bool QuadExtractor::extract()
 
     report(0.31f, "Smoothing and projecting");
     Log::write(Log::Debug, "Smooth and project...");
-    smoothAndProject(5);
+    timedPass("smoothAndProject", [&]() { smoothAndProject(5); });
     Log::write(Log::Debug, "Smooth and project done");
 
     report(0.44f, "Splitting seven edge faces");
-    splitSevenEdgeFaces();
+    timedPass("splitSevenEdgeFaces", [&]() { splitSevenEdgeFaces(); });
     report(0.45f, "Splitting six edge faces");
-    splitSixEdgeFaces();
+    timedPass("splitSixEdgeFaces", [&]() { splitSixEdgeFaces(); });
     // A pentagon is the best place for a triangle to end up, it comes out of the
     // collapse as a quad, so the triangles run first and the merge takes care of
     // whatever pentagons are left over
     report(0.46f, "Cleaning up triangles");
-    cleanupTriangles();
+    timedPass("cleanupTriangles", [&]() { cleanupTriangles(); });
     report(0.53f, "Merging shared five edge faces");
     ProgressHandler mergeProgress;
     if (m_progressHandler) {
@@ -311,21 +330,21 @@ bool QuadExtractor::extract()
     // Runs last, it only reconnects quad pairs, so it wants the triangles and
     // pentagons to have become quads already
     report(0.85f, "Switching high valence edges");
-    switchHighValenceEdges();
+    timedPass("switchHighValenceEdges", [&]() { switchHighValenceEdges(); });
     report(0.89f, "Converting triangle and five edge fans");
-    convertTriangleAndFiveEdgeFans();
+    timedPass("convertTriangleAndFiveEdgeFans", [&]() { convertTriangleAndFiveEdgeFans(); });
     report(0.93f, "Collapsing three valence diagonals");
-    collapseThreeValenceDiagonals();
+    timedPass("collapseThreeValenceDiagonals", [&]() { collapseThreeValenceDiagonals(); });
     report(0.95f, "Merging double shared edge quads");
-    mergeDoubleSharedEdgeQuads();
+    timedPass("mergeDoubleSharedEdgeQuads", [&]() { mergeDoubleSharedEdgeQuads(); });
     report(0.96f, "Merging three and five valence triangles");
-    mergeThreeAndFiveValenceTriangles();
+    timedPass("mergeThreeAndFiveValenceTriangles", [&]() { mergeThreeAndFiveValenceTriangles(); });
     report(0.97f, "Collapsing three valence corners");
-    collapseThreeValenceCorners();
+    timedPass("collapseThreeValenceCorners", [&]() { collapseThreeValenceCorners(); });
     report(0.98f, "Splitting high valence triangle fans");
-    splitHighValenceTriangleFans();
+    timedPass("splitHighValenceTriangleFans", [&]() { splitHighValenceTriangleFans(); });
     report(0.99f, "Collapsing three valence edge pairs");
-    collapseThreeValenceEdgePairs();
+    timedPass("collapseThreeValenceEdgePairs", [&]() { collapseThreeValenceEdgePairs(); });
     if (m_localRemesh) {
         report(0.995f, "Optimising local topology");
         // A sweep over every face is cheap; the budget only has to stop a
@@ -1617,6 +1636,7 @@ size_t QuadExtractor::optimizeLocalTopology(size_t maximumOperations)
     };
 
     std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    edgeFaces.reserve(m_remeshedPolygons.size() * 2);
     std::vector<size_t> vertexValence;
     const auto buildIndex = [&]() {
         edgeFaces.clear();
@@ -2042,6 +2062,7 @@ size_t QuadExtractor::requadrangulateNonQuadPatches(size_t maximumPatches)
     std::unordered_set<Edge, CleanupEdgeHash> patchEdgeSet;
     // Edge to owning face index; rebuilt after every applied patch
     std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    edgeFaces.reserve(m_remeshedPolygons.size() * 2);
     // How far a patch quad may lean before it is refused.  The projection pass
     // that follows pulls the new quads onto the source surface, so a patch quad
     // may be less flat than a face the extractor created from scratch.
@@ -3919,6 +3940,7 @@ void QuadExtractor::splitSixEdgeFaces()
         return;
 
     std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+    vertexNeighbors.reserve(m_remeshedVertices.size());
     for (const auto& face : m_remeshedPolygons) {
         for (size_t i = 0; i < face.size(); ++i) {
             size_t j = (i + 1) % face.size();
@@ -4056,7 +4078,9 @@ void QuadExtractor::convertTriangleAndFiveEdgeFans()
     std::unordered_set<size_t> convertedVertices;
     for (;;) {
         std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         std::unordered_map<size_t, std::vector<size_t>> vertexFaces;
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
@@ -4071,6 +4095,7 @@ void QuadExtractor::convertTriangleAndFiveEdgeFans()
         }
 
         std::unordered_set<size_t> borderVertices;
+        borderVertices.reserve(64);
         for (const auto& it : edgeFaces) {
             if (2 == it.second.size())
                 continue;
@@ -4333,6 +4358,7 @@ void QuadExtractor::collapseThreeValenceDiagonals()
     // faces an operation rewrites.  Rebuilding them for the whole polygon set once
     // per collapse was the dominant cost of this pass.
     std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    edgeFaces.reserve(m_remeshedPolygons.size() * 2);
     std::vector<std::vector<size_t>> vertexFaces;
     std::vector<std::vector<size_t>> vertexNeighborScratch;
     std::vector<size_t> vertexFaceCount;
@@ -4707,6 +4733,7 @@ void QuadExtractor::mergeDoubleSharedEdgeQuads()
     std::unordered_set<size_t> mergedVertices;
     for (;;) {
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         std::unordered_map<size_t, std::vector<size_t>> vertexFaces;
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
@@ -4730,6 +4757,7 @@ void QuadExtractor::mergeDoubleSharedEdgeQuads()
         }
 
         std::unordered_set<uint64_t> existingFaces;
+        existingFaces.reserve(m_remeshedPolygons.size());
         for (const auto& face : m_remeshedPolygons)
             existingFaces.insert(canonicalFaceHash(face));
 
@@ -4865,7 +4893,9 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
     std::unordered_set<size_t> mergedVertices;
     for (;;) {
         std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         std::unordered_map<size_t, std::vector<size_t>> vertexFaces;
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
@@ -4880,6 +4910,7 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
         }
 
         std::unordered_set<size_t> borderVertices;
+        borderVertices.reserve(64);
         for (const auto& it : edgeFaces) {
             if (2 == it.second.size())
                 continue;
@@ -4933,6 +4964,7 @@ void QuadExtractor::mergeThreeAndFiveValenceTriangles()
         };
 
         std::unordered_set<uint64_t> existingFaces;
+        existingFaces.reserve(m_remeshedPolygons.size());
         for (const auto& face : m_remeshedPolygons)
             existingFaces.insert(canonicalFaceHash(face));
 
@@ -5203,7 +5235,9 @@ void QuadExtractor::collapseThreeValenceCorners()
     std::unordered_set<size_t> collapsedVertices;
     for (;;) {
         std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         std::unordered_map<size_t, std::vector<size_t>> vertexFaces;
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
@@ -5218,6 +5252,7 @@ void QuadExtractor::collapseThreeValenceCorners()
         }
 
         std::unordered_set<size_t> borderVertices;
+        borderVertices.reserve(64);
         for (const auto& it : edgeFaces) {
             if (2 == it.second.size())
                 continue;
@@ -5438,7 +5473,9 @@ void QuadExtractor::splitHighValenceTriangleFans()
     std::unordered_set<size_t> splitVertices;
     for (;;) {
         std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         std::unordered_map<size_t, std::vector<size_t>> vertexFaces;
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
@@ -5453,6 +5490,7 @@ void QuadExtractor::splitHighValenceTriangleFans()
         }
 
         std::unordered_set<size_t> borderVertices;
+        borderVertices.reserve(64);
         for (const auto& it : edgeFaces) {
             if (2 == it.second.size())
                 continue;
@@ -5715,7 +5753,9 @@ void QuadExtractor::collapseThreeValenceEdgePairs()
     std::unordered_set<size_t> collapsedVertices;
     for (;;) {
         std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         std::unordered_map<size_t, std::vector<size_t>> vertexFaces;
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
@@ -5730,6 +5770,7 @@ void QuadExtractor::collapseThreeValenceEdgePairs()
         }
 
         std::unordered_set<size_t> borderVertices;
+        borderVertices.reserve(64);
         for (const auto& it : edgeFaces) {
             if (2 == it.second.size())
                 continue;
@@ -6002,7 +6043,9 @@ void QuadExtractor::switchHighValenceEdges()
     std::unordered_set<size_t> switchedVertices;
     for (;;) {
         std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+        edgeFaces.reserve(m_remeshedPolygons.size() * 2);
         std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+        vertexNeighbors.reserve(m_remeshedVertices.size());
         for (size_t faceIndex = 0; faceIndex < m_remeshedPolygons.size(); ++faceIndex) {
             const auto& face = m_remeshedPolygons[faceIndex];
             for (size_t i = 0; i < face.size(); ++i) {
@@ -6015,6 +6058,7 @@ void QuadExtractor::switchHighValenceEdges()
 
         // Four neighbors is the wrong target on a border, leave those alone
         std::unordered_set<size_t> borderVertices;
+        borderVertices.reserve(64);
         for (const auto& it : edgeFaces) {
             if (2 == it.second.size())
                 continue;
@@ -6023,6 +6067,7 @@ void QuadExtractor::switchHighValenceEdges()
         }
 
         std::unordered_set<uint64_t> existingFaces;
+        existingFaces.reserve(m_remeshedPolygons.size());
         for (const auto& face : m_remeshedPolygons)
             existingFaces.insert(canonicalFaceHash(face));
 
@@ -6266,6 +6311,7 @@ void QuadExtractor::cleanupTriangles()
     // faces an operation actually rewrites; dissolved faces are left empty in place
     // so face indices stay stable.
     std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    edgeFaces.reserve(m_remeshedPolygons.size() * 2);
     std::vector<std::vector<size_t>> vertexFaces;
     const auto addFaceToIndices = [&](size_t faceIndex) {
         const auto& face = m_remeshedPolygons[faceIndex];
@@ -6572,6 +6618,7 @@ void QuadExtractor::splitSevenEdgeFaces()
         return;
 
     std::unordered_map<size_t, std::unordered_set<size_t>> vertexNeighbors;
+    vertexNeighbors.reserve(m_remeshedVertices.size());
     for (const auto& face : m_remeshedPolygons) {
         for (size_t i = 0; i < face.size(); ++i) {
             size_t j = (i + 1) % face.size();
@@ -6727,6 +6774,7 @@ void QuadExtractor::mergeSharedFiveEdgeFaces(const ProgressHandler* progressHand
     // the faces a merge rewrites; rebuilding them for the whole polygon set once
     // per merge was the bulk of this pass.
     std::unordered_map<Edge, std::vector<size_t>, CleanupEdgeHash> edgeFaces;
+    edgeFaces.reserve(m_remeshedPolygons.size() * 2);
     std::vector<std::vector<size_t>> vertexFaces;
     std::vector<std::vector<size_t>> vertexNeighborScratch;
     std::unordered_map<uint64_t, size_t> faceHashCounts;

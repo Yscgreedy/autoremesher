@@ -862,6 +862,10 @@ bool AutoRemesher::remesh()
                 thread.parameterizer->setAnisotropy(thread.island->anisotropy);
                 thread.parameterizer->setSharpEdgeDegrees(thread.island->sharpEdgeDegrees);
                 thread.parameterizer->setTargetQuadCount(thread.island->targetQuads);
+                if (thread.autoRemesher->m_coverAttempts > 0)
+                    thread.parameterizer->setMaximumCoverAttempts(thread.autoRemesher->m_coverAttempts);
+                if (thread.autoRemesher->m_curlMode > 0)
+                    thread.parameterizer->setCurlMode(thread.autoRemesher->m_curlMode);
                 bool parameterizeSucceeded = true;
                 try {
                     parameterizeSucceeded = thread.parameterizer->parameterize();

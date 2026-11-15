@@ -1346,6 +1346,8 @@ void AutoRemesher::symmetrizeOutput()
     const size_t axis = (size_t)(m_symmetryAxis - 1);
     m_symmetryStats.axis = m_symmetryAxis;
     m_symmetryStats.verticesBefore = m_remeshedVertices.size();
+    const double plane = m_symmetryPlane;
+    m_symmetryStats.plane = plane;
 
     // The quad mesh is cut at the plane and the positive half is mirrored onto the
     // negative one, so the result is symmetric by construction instead of by
@@ -1379,8 +1381,8 @@ void AutoRemesher::symmetrizeOutput()
         return kept;
     };
     const auto snapToSeam = [&](Vector3 point) {
-        if (std::fabs(point[axis]) <= seamTolerance)
-            point[axis] = 0.0;
+        if (std::fabs(point[axis] - plane) <= seamTolerance)
+            point[axis] = plane;
         return point;
     };
 
@@ -1394,7 +1396,7 @@ void AutoRemesher::symmetrizeOutput()
         bool anyPositive = false;
         bool anyNegative = false;
         for (const size_t corner : face) {
-            const double coordinate = m_remeshedVertices[corner][axis];
+            const double coordinate = m_remeshedVertices[corner][axis] - plane;
             if (coordinate > 0.0)
                 anyPositive = true;
             else if (coordinate < 0.0)
@@ -1425,8 +1427,8 @@ void AutoRemesher::symmetrizeOutput()
         const size_t count = face.size();
         for (size_t i = 0; i < count; ++i) {
             const size_t j = (i + 1) % count;
-            const double di = m_remeshedVertices[face[i]][axis];
-            const double dj = m_remeshedVertices[face[j]][axis];
+            const double di = m_remeshedVertices[face[i]][axis] - plane;
+            const double dj = m_remeshedVertices[face[j]][axis] - plane;
             if (di >= 0.0) {
                 clipped.push_back(m_remeshedVertices[face[i]]);
                 clippedSource.push_back(face[i]);
@@ -1464,8 +1466,8 @@ void AutoRemesher::symmetrizeOutput()
     // Everything on the plane snaps exactly onto it.
     std::vector<char> onPlane(vertices.size(), 0);
     for (size_t i = 0; i < vertices.size(); ++i) {
-        if (std::fabs(vertices[i][axis]) <= seamTolerance) {
-            vertices[i][axis] = 0.0;
+        if (std::fabs(vertices[i][axis] - plane) <= seamTolerance) {
+            vertices[i][axis] = plane;
             onPlane[i] = 1;
         }
     }
@@ -1497,18 +1499,37 @@ void AutoRemesher::symmetrizeOutput()
                 }
             }
             const std::pair<long long, long long> key(first, second);
-            const auto found = seamMap.find(key);
-            if (found == seamMap.end())
+            // Rounding alone is not enough: two seam points a hair apart can land
+            // on different sides of a cell boundary, which leaves a sliver face
+            // with its own private copy of the edge.  Search the neighbouring
+            // cells and take the closest point within the tolerance.
+            size_t canonical = noIndex;
+            double best = seamTolerance;
+            for (long long da = -1; da <= 1; ++da) {
+                for (long long db = -1; db <= 1; ++db) {
+                    const auto found = seamMap.find({ first + da, second + db });
+                    if (found == seamMap.end())
+                        continue;
+                    const double distance = (vertices[found->second] - vertices[i]).length();
+                    if (distance <= best) {
+                        best = distance;
+                        canonical = found->second;
+                    }
+                }
+            }
+            if (canonical == noIndex)
                 seamMap[key] = i;
             else
-                weld[i] = found->second;
+                weld[i] = canonical;
         }
         for (auto& face : faces) {
             std::vector<size_t> remapped;
             remapped.reserve(face.size());
             for (const size_t corner : face) {
                 const size_t target = weld[corner];
-                if (!remapped.empty() && remapped.back() == target)
+                // A welded corner can meet an earlier one anywhere in the face,
+                // not only at its end, so dedupe the whole polygon.
+                if (std::find(remapped.begin(), remapped.end(), target) != remapped.end())
                     continue;
                 remapped.push_back(target);
             }
@@ -1547,7 +1568,7 @@ void AutoRemesher::symmetrizeOutput()
 
     onPlane.assign(vertices.size(), 0);
     for (size_t i = 0; i < vertices.size(); ++i) {
-        if (vertices[i][axis] == 0.0)
+        if (vertices[i][axis] == plane)
             onPlane[i] = 1;
     }
 
@@ -1559,7 +1580,7 @@ void AutoRemesher::symmetrizeOutput()
             continue;
         }
         Vector3 mirrored = vertices[i];
-        mirrored[axis] = -mirrored[axis];
+        mirrored[axis] = 2.0 * plane - mirrored[axis];
         mirrorIndex[i] = vertices.size();
         vertices.push_back(mirrored);
     }
@@ -1569,7 +1590,7 @@ void AutoRemesher::symmetrizeOutput()
         const std::vector<size_t> face = faces[faceIndex];
         bool hasPositive = false;
         for (const size_t corner : face) {
-            if (vertices[corner][axis] > 0.0) {
+            if (vertices[corner][axis] > plane) {
                 hasPositive = true;
                 break;
             }
@@ -1596,7 +1617,7 @@ void AutoRemesher::symmetrizeOutput()
         m_remeshedFaceUvs.clear();
 
     for (size_t i = 0; i < m_remeshedVertices.size(); ++i) {
-        if (m_remeshedVertices[i][axis] == 0.0)
+        if (m_remeshedVertices[i][axis] == plane)
             ++m_symmetryStats.seamVertices;
     }
     m_symmetryStats.verticesAfter = m_remeshedVertices.size();

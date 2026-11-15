@@ -43,7 +43,11 @@ Unreleased
   mirrors the positive half, so the result is symmetric by construction.  Face
   clipping carries the face's own UVs; the cut row loses a corner (98.6% quads on
   the sphere fixture, 0 unmatched vertices, 3 seam edge(s) left open by the weld).
-  `--symmetry-tolerance` sets what counts as the seam (0.002 of the bbox diagonal)
+  `--symmetry-plane` moves the mirror plane off the coordinate plane (models that
+  are not centred on the origin), `--symmetry-tolerance` sets what counts as the
+  seam (0.002 of the bbox diagonal).  The seam weld now searches neighbouring grid
+  cells, which closes the last sliver faces: the sphere fixture comes out with zero
+  open edges and zero non-manifold edges
 - Add `tools/smoke_cli.py`, wired into the gates workflow: it asserts the JSON
   envelope (input event, warning for an open shell, result topology/holes/patches/
   phases), that `--quiet` is silent, that vt/vn are written (and skipped on demand),

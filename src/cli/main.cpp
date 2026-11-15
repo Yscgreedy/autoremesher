@@ -131,7 +131,8 @@ struct Options {
     int threads = 0;
     bool writeUvs = true;
     bool writeNormals = true;
-    int symmetryAxis = 0; // 0 off, 1 x=0, 2 y=0, 3 z=0
+    int symmetryAxis = 0; // 0 off, 1 x, 2 y, 3 z
+    double symmetryPlane = 0.0;
     double symmetryTolerance = 0.002;
     int logLevel = 1; // 0 = silent, 1 = normal, 2 = debug (core Log::Level order)
     bool json = false;
@@ -201,7 +202,9 @@ const char* kUsage =
     "      --symmetry AXIS         x | y | z: snap the output onto its own mirror\n"
     "                              plane where both sides agree, and count where\n"
     "                              they do not (default off)\n"
-    "      --symmetry-tolerance F  pairing tolerance as a fraction of the bbox\n"
+    "      --symmetry-plane F      coordinate of the mirror plane along the axis\n"
+    "                              (default 0, the coordinate plane)\n"
+    "      --symmetry-tolerance F  seam tolerance as a fraction of the bbox\n"
     "                              diagonal (default 0.002)\n"
     "\n"
     "Remeshing:\n"
@@ -359,6 +362,8 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
                 *exitCode = 1;
                 return false;
             }
+        } else if (arg == "--symmetry-plane") {
+            options->symmetryPlane = number();
         } else if (arg == "--symmetry-tolerance") {
             options->symmetryTolerance = number();
         } else if (arg == "--no-uv") {
@@ -876,6 +881,7 @@ int main(int argc, char** argv)
     remesher.setLocalRemesh(options.localRemesh);
     remesher.setExportUvs(options.writeUvs);
     remesher.setSymmetryAxis(options.symmetryAxis);
+    remesher.setSymmetryPlane(options.symmetryPlane);
     remesher.setSymmetryTolerance(options.symmetryTolerance);
     // --verbose prints the report itself below, so the library must not print it
     // a second time; --quiet suppresses it entirely.
@@ -1000,7 +1006,8 @@ int main(int argc, char** argv)
                 << ",\"mirroredFaces\":" << symmetry.mirroredFaces
                 << ",\"verticesBefore\":" << symmetry.verticesBefore
                 << ",\"verticesAfter\":" << symmetry.verticesAfter
-                << ",\"tolerance\":" << std::setprecision(6) << symmetry.tolerance << "}"
+                << ",\"plane\":" << std::setprecision(6) << symmetry.plane
+                << ",\"tolerance\":" << symmetry.tolerance << "}"
                 << ",\"normals\":" << (normals.empty() ? "false" : "true")
                 << ",\"phases\":" << phasesJson(remesher.phaseTimings())
                 << "}";
@@ -1016,8 +1023,8 @@ int main(int argc, char** argv)
         printf("  uv: %s (%zu corners), normals: %s\n",
             hasUvs ? "yes" : "none", uvCorners, normals.empty() ? "no" : "yes");
         if (options.symmetryAxis > 0) {
-            printf("  symmetry: %s=0, %zu seam vertices, %zu faces cut, %zu mirrored (%zu -> %zu verts)\n",
-                symmetryAxisName(options.symmetryAxis), symmetry.seamVertices,
+            printf("  symmetry: %s=%.6g, %zu seam vertices, %zu faces cut, %zu mirrored (%zu -> %zu verts)\n",
+                symmetryAxisName(options.symmetryAxis), symmetry.plane, symmetry.seamVertices,
                 symmetry.clippedFaces, symmetry.mirroredFaces,
                 symmetry.verticesBefore, symmetry.verticesAfter);
         }

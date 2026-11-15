@@ -333,6 +333,14 @@ public:
         m_symmetryTolerance = fraction;
     }
 
+    // Where the mirror plane sits along the chosen axis (default 0, i.e. the
+    // coordinate plane).  Matching a model that is not centred on the origin is
+    // the normal case, so this is a first-class setting rather than a convention.
+    void setSymmetryPlane(double offset)
+    {
+        m_symmetryPlane = offset;
+    }
+
     struct SymmetryStats {
         int axis = 0;
         size_t seamVertices = 0;
@@ -340,6 +348,7 @@ public:
         size_t mirroredFaces = 0;  // faces added by the mirror
         size_t verticesBefore = 0;
         size_t verticesAfter = 0;
+        double plane = 0.0;        // coordinate of the mirror plane along the axis
         double tolerance = 0.0;    // how close to the plane counts as "on the seam"
     };
 
@@ -412,6 +421,7 @@ private:
     bool m_exactTargetQuads = false;
     bool m_exportUvs = true;
     int m_symmetryAxis = 0;
+    double m_symmetryPlane = 0.0;
     double m_symmetryTolerance = 0.002;
     SymmetryStats m_symmetryStats;
 

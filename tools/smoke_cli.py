@@ -206,6 +206,14 @@ def main():
         check("input_open_boundary" in codes,
               "open shell did not warn about its boundary (codes: %r)" % codes, failures)
 
+        proc = run(binary, ["--input", model, "--output", os.path.join(workspace, "dev.obj"),
+                            "--target-quads", "500", "--deviation", "--json", "--quiet"])
+        deviation = (parse_events(proc.stdout)[-1] if proc.stdout.strip() else {}).get("deviation", {})
+        check(proc.returncode == 0 and deviation.get("samples", 0) > 0,
+              "deviation did not report samples: %r" % deviation, failures)
+        check(deviation.get("max", 0.0) < 0.5,
+              "deviation max %r is implausibly large" % deviation.get("max"), failures)
+
         proc = run(binary, ["--input", model, "--output", os.path.join(workspace, "uvmode.obj"),
                             "--target-quads", "500", "--uv-mode", "vertex", "--json", "--quiet"])
         vertex_mode = (parse_events(proc.stdout)[-1] if proc.stdout.strip() else {}).get("uvMode")

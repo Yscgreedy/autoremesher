@@ -2,6 +2,7 @@
 # Re-run: python tools/gen_sources.py
 set(AUTOREMESHER_CORE_MODULE_SOURCES
     "src/core/base/positionkey.cpp"
+    "src/core/geom/deviation.cpp"
     "src/core/geom/meshseparator.cpp"
     "src/core/geom/surfacemesh.cpp"
     "src/core/geom/topologystats.cpp"

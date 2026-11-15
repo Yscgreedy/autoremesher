@@ -14,6 +14,7 @@ autoremesher --input MODEL.obj --output OUT.obj --target-quads 20000 [options]
 |---|---|---|
 | `-i, --input PATH` | required | input OBJ (triangles and/or quads; polygons are triangulated) |
 | `-o, --output PATH` | `<input-stem>_remeshed.obj` | output OBJ: quad faces with `vt` per corner and `vn` per vertex |
+| `--deviation` | off | measure how far the output sits from the input surface |
 | `--uv-mode corner\|vertex\|hybrid\|seam` | corner | which UV channel to write (see below); seam cuts the mesh at chart boundaries |
 | `--no-uv` | off | skip the `vt` lines |
 | `--no-normals` | off | skip the `vn` lines |
@@ -61,6 +62,7 @@ One JSON object per line, flushed as it happens. The GUI reads stdout line by li
  "topology":{"input":{"...":"same fields as the input event"},"output":{"boundaryEdges":0,"boundaryLoops":0,"nonManifoldEdges":0,"components":7,"degenerateFaces":0}},
  "holes":{"filled":3,"ignored":1,"facesAdded":42},"patches":{"kept":7,"dropped":2},
  "uvs":true,"uvCorners":79840,"normals":true,
+ "deviation":{"samples":18422,"unresolved":0,"mean":0.000119,"p50":0.000081,"p95":0.000375,"max":0.000856},
  "symmetry":{"axis":"x","seamVertices":168,"clippedFaces":176,"mirroredFaces":3227,"verticesBefore":6278,"verticesAfter":6446,"plane":0,"tolerance":0.0069},
  "phases":[{"name":"Analyze input topology","ms":12.1,"accumulated":false},{"name":"Solve frame field","ms":267.8,"accumulated":true}]}
 {"type":"error","message":"failed to load input.obj"}

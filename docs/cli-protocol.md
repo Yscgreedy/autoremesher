@@ -111,3 +111,75 @@ It locates the CLI as: `--cli` flag, else next to its own executable, else `.`, 
   pinned the old output should pass `--legacy-target-quads`.
 - Static assets are served under `/s/<token>/`; every `/api/*` call needs the token
   as `?token=`, `X-AR-Token` header or cookie. The page HTML never contains it.
+
+### Flags added in 1.3 (additive; every old flag keeps its meaning)
+
+| flag | default | meaning |
+|---|---|---|
+| `--check-only` | off | analyse the input and exit: area, volume, bbox, unit guess, shell and boundary counts, degenerate edges, plus a parameter `advice` block. Writes nothing; `result` carries `"checkOnly": true` and `"output": null`. |
+| `--preset-file PATH` | — | flat JSON object of knobs, applied **after** `--preset` and **before** the command line: a flag the caller passed always wins. An unknown or malformed key warns instead of being ignored silently. |
+| `--symmetry check\|snap\|mirror-half` | mirror | what the pass does: `check` only measures, `snap` moves the near-plane vertices without cutting, `mirror-half` is the historical cut-weld-mirror. |
+| `--symmetry-mode M` | mirror | the same choice spelled out, for scripts that pass the axis separately. |
+| `--symmetry-keep positive\|negative` | positive | which side `mirror-half` keeps. |
+| `--clean-degenerate` / `--no-clean-degenerate` | on | weld zero length edges and drop degenerate / duplicate faces at the end of extraction. Off restores the pre-1.3 file, for an A/B run. |
+| `--max-aspect F` | 0 | reserved for the aspect clamp; 0 removes only the degenerate cells. |
+| `--unit-hint mm\|cm\|m` | guess | only changes the unit `unit_guess` reports, never a threshold. |
+
+### `result` blocks added in 1.3 (all additive)
+
+```json
+{"type":"result","quads":19697,"quadsError":-0.0152,
+ "topology":{
+   "input":{ "…":"unchanged" },
+   "internal":{ "vertices":20170,"faces":20169,"quads":19662,"boundaryEdges":37,
+                "edgesWithMoreThanTwoFaces":0,"nonManifoldEdgesBlender":37,
+                "components":15,"degenerateFaces":0 },
+   "exported":{ "…":"the same fields, measured by re-reading the written OBJ" },
+   "same":true,
+   "output":{ "…":"alias of internal, kept for v1 readers; removed in v2" } },
+ "quality":{"poles_pct":9.87,"pole_count":1991,"interior_vertices":20168,
+            "valence_max":14,"valence_hist":{"3":819,"4":18180,"5":902,"gt5":144},
+            "edge_len":{"min":0.0,"p50":0.0027,"p95":0.00393,"max":0.00832},
+            "quad_aspect":{"p50":1.34,"p95":3.57,"max":268.4},
+            "quad_aspect_area":{"max":128.4},
+            "zero_length_edges":0,"degenerate_faces":0},
+ "budget":{"requested":20000,"actual":19697,"error":-0.0152,
+           "withinTolerance":true,"mode":"solved","non_quads":507},
+ "unit_guess":"m","unit_scale_to_mm":1000,
+ "patches":{"kept":16,"dropped":0,"welded_vertices":812,"remaining_shells":15,
+            "reason":"gap_exceeds_tolerance"},
+ "uvStats":{"mode":"corner","area":1.2255,"overlap_pct":67.5,"chart_count":0,
+            "max_stretch":4.1,"median_stretch":1.8,"stray_triangles":0,"bakeable":false},
+ "symmetry":{"axis":"x","mode":"check","keep_positive":true,"match_pct":1.8,
+             "max_deviation":0.00062,"mean_deviation":0.0002,"plane_estimate":-0.0091,
+             "matched_vertices":136,"considered_vertices":7487,
+             "snapped_verts":0,"max_snap":0.0,"snap_tolerance":0.0},
+ "effective_params":{"targetQuads":20000,"adaptivity":0.3,"…":"every knob, after preset and preset-file"}}
+```
+
+Conventions worth knowing:
+
+- **`topology.internal` vs `topology.exported`**: the first is the mesh the core
+  measured, the second is what the written file contains, re-read and re-analysed
+  with the same rules; `same` is true when every field agrees. They differed in
+  1.2: the cleanup passes left duplicated faces in the file, which turned boundary
+  edges into three-face edges, and an outside tool that drops duplicate polygons
+  (Blender's importer does) then described a different mesh than the JSON did.
+- **Non-manifold means two things.** `nonManifoldEdges` (historical) counts edges
+  used by more than two faces; `nonManifoldEdgesBlender` also counts boundary
+  edges, which is what Blender's Non Manifold select picks up.
+- **`quality.poles_pct`** counts vertices away from the border whose valence is
+  not 4, over the interior vertex count. `valence_hist` is over interior vertices,
+  `valence_max` over all of them.
+- **`quad_aspect`** is `max_edge / min_edge`; `quad_aspect_area` is
+  `max_edge^2 / (4*area)`, the area-relative convention Blender-based tooling uses.
+- **`uvStats.area`** is the summed UV area of the layout as written; above 1 the
+  layout overlaps itself and a bake smears two faces onto the same texels.
+  `bakeable` is true only when `area` is in (0,1] and `overlap_pct < 1`.
+- **`uvs` stays a boolean** in v1; `uvStats` is the measured object beside it.
+- **`patches.reason`** is empty when the shell count is the design and names the
+  cause otherwise: `no_weld_requested`, `open_holes`, `gap_exceeds_tolerance`.
+- Warning codes added: `output_reload_failed`, `symmetry_mismatch`,
+  `symmetry_clip_heavy`.
+
+

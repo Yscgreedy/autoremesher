@@ -11,6 +11,7 @@ set(AUTOREMESHER_CORE_MODULE_SOURCES
     "src/core/field/singularitysimplifier.cpp"
     "src/core/cover/quadparameterizer.cpp"
     "src/core/param/parameterizer.cpp"
+    "src/core/param/uvcharts.cpp"
     "src/core/param/uvtransfer.cpp"
     "src/core/extract/quadextractor.cpp"
     "src/core/pipeline/autoremesher.cpp"

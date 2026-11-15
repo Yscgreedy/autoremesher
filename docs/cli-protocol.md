@@ -14,7 +14,7 @@ autoremesher --input MODEL.obj --output OUT.obj --target-quads 20000 [options]
 |---|---|---|
 | `-i, --input PATH` | required | input OBJ (triangles and/or quads; polygons are triangulated) |
 | `-o, --output PATH` | `<input-stem>_remeshed.obj` | output OBJ: quad faces with `vt` per corner and `vn` per vertex |
-| `--uv-mode corner\|vertex\|hybrid` | corner | which UV channel to write (see below) |
+| `--uv-mode corner\|vertex\|hybrid\|seam` | corner | which UV channel to write (see below); seam cuts the mesh at chart boundaries |
 | `--no-uv` | off | skip the `vt` lines |
 | `--no-normals` | off | skip the `vn` lines |
 | `--symmetry x\|y\|z` | off | cut at that plane, weld the seam, mirror the positive half |

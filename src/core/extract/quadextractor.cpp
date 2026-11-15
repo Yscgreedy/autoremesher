@@ -3163,9 +3163,13 @@ void QuadExtractor::validateRemeshedMesh()
         }
         keptFaces.push_back(std::move(face));
     }
+    // Always take the kept list, not only when the count changed: the kept faces
+    // were *moved* out of m_remeshedPolygons above, so skipping the assignment
+    // leaves the vector full of moved-from (empty) polygons.  On the shoe case
+    // something is always dropped, which is exactly why the conditional version
+    // passed there and emptied every face of a clean mesh.
     const bool facesChanged = keptFaces.size() != m_remeshedPolygons.size();
-    if (facesChanged)
-        m_remeshedPolygons = std::move(keptFaces);
+    m_remeshedPolygons = std::move(keptFaces);
 
     // Counting faces per undirected edge needs its own map: buildEdgeToFaceMap
     // stores one face index per directed edge, which answers a different

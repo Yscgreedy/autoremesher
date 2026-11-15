@@ -211,6 +211,17 @@ def main():
         check(mirror["v"] == symmetry.get("verticesAfter"),
               "symmetry vertex count %d vs reported %r" % (mirror["v"], symmetry.get("verticesAfter")),
               failures)
+        check(symmetry.get("plane") == 0.0, "symmetry plane missing: %r" % symmetry, failures)
+
+        # A plane off the origin: the report has to carry the coordinate it used.
+        proc = run(binary, ["--input", model, "--output", os.path.join(workspace, "sym_off.obj"),
+                            "--target-quads", "500", "--symmetry", "x", "--symmetry-plane", "0.25",
+                            "--json", "--quiet"])
+        off_events = parse_events(proc.stdout)
+        off = (off_events[-1] if off_events else {}).get("symmetry", {})
+        check(proc.returncode == 0 and abs(off.get("plane", 0.0) - 0.25) < 1e-9,
+              "symmetry plane not honoured: %r" % off, failures)
+        check(off.get("seamVertices", 0) > 0, "plane-shifted symmetry welded no seam: %r" % off, failures)
 
     if failures:
         print("smoke: FAIL")

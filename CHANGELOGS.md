@@ -43,6 +43,10 @@ Unreleased
   12k sphere the solver sees one chart while the extraction needs 22 seams.  The
   ids are exposed for the extractor change that will tag each cross point with
   them, and are computed in one pass over the triangles.
+- `--deviation`: the CLI reports how far the output sits from the input surface
+  (exact point-triangle distance, uniform grid over the input triangles):
+  mean/p50/p95/max in `result.deviation` and one human line.  Sphere 12k: mean
+  1.2e-4, p95 3.8e-4, max 8.6e-4; multi_part 6k: mean 1.7e-3, p95 6.1e-3.
 - Progress reporting on many-island models: finding the slowest island scanned
   every island on every report, which made `--json` take 63 s on the 17,958-shell
   input while the same run took 5.5 s without it.  The scan is rate limited to

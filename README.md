@@ -83,6 +83,8 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
   -i, --input PATH            input OBJ (polygons are triangulated)
   -o, --output PATH           output OBJ of quads with vt and vn (default:
                               <input>_remeshed.obj)
+      --deviation             measure the output's distance to the input surface
+                              (mean/p95/max, exact point-triangle)
       --uv-mode M             corner | vertex | hybrid | seam (default corner)
       --no-uv                 do not write vt lines
       --no-normals            do not write vn lines

@@ -131,6 +131,7 @@ struct Options {
     int threads = 0;
     bool writeUvs = true;
     bool writeNormals = true;
+    bool measureDeviation = false;
     std::string uvMode = "corner";
     int symmetryAxis = 0; // 0 off, 1 x, 2 y, 3 z
     double symmetryPlane = 0.0;
@@ -246,6 +247,8 @@ const char* kUsage =
     "                              result carries topology, holes, patches, phases\n"
     "      --progress              progress on stderr\n"
     "      --verbose               per-phase report at the end\n"
+    "      --deviation             measure how far the output sits from the input\n"
+    "                              surface (mean/p95/max, exact point-triangle)\n"
     "      --log-level L           quiet | normal | debug (default normal);\n"
     "                              debug adds the per-step and per-hole traces\n"
     "      --quiet                 no human output except errors\n"
@@ -374,6 +377,8 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->symmetryPlane = number();
         } else if (arg == "--symmetry-tolerance") {
             options->symmetryTolerance = number();
+        } else if (arg == "--deviation") {
+            options->measureDeviation = true;
         } else if (arg == "--uv-mode") {
             const std::string mode = value();
             if (mode == "corner" || mode == "vertex" || mode == "hybrid" || mode == "seam") {
@@ -817,6 +822,20 @@ std::string topologyJson(const AutoRemesher::TopologyStats& stats)
     return out.str();
 }
 
+std::string deviationJson(const AutoRemesher::DeviationStats& stats)
+{
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out << "{\"samples\":" << stats.samples
+        << ",\"unresolved\":" << stats.unresolved
+        << ",\"mean\":" << std::setprecision(6) << stats.mean
+        << ",\"p50\":" << stats.p50
+        << ",\"p95\":" << stats.p95
+        << ",\"max\":" << stats.max
+        << "}";
+    return out.str();
+}
+
 std::string phasesJson(const std::vector<AutoRemesher::PhaseTiming>& timings)
 {
     std::ostringstream out;
@@ -990,6 +1009,7 @@ int main(int argc, char** argv)
     remesher.setExportUvs(options.writeUvs);
     const bool seamSplit = options.uvMode == "seam" && options.symmetryAxis == 0;
     remesher.setUvSeamSplitting(seamSplit);
+    remesher.setMeasureDeviation(options.measureDeviation);
     if (options.uvMode == "seam" && options.symmetryAxis > 0) {
         if (options.json) {
             std::ostringstream line;
@@ -1135,6 +1155,7 @@ int main(int argc, char** argv)
                 << ",\"plane\":" << std::setprecision(6) << symmetry.plane
                 << ",\"tolerance\":" << symmetry.tolerance << "}"
                 << ",\"normals\":" << (normals.empty() ? "false" : "true")
+                << ",\"deviation\":" << deviationJson(remesher.deviationStats())
                 << ",\"phases\":" << phasesJson(remesher.phaseTimings())
                 << "}";
         emitLine(payload.str());
@@ -1146,6 +1167,11 @@ int main(int argc, char** argv)
         printf("  topology: %zu boundary edge(s) in %zu loop(s), %zu non-manifold edge(s), %zu component(s)\n",
             outputStats.boundaryEdges, outputStats.boundaryLoops,
             outputStats.nonManifoldEdges, outputStats.components);
+        if (options.measureDeviation) {
+            printf("  deviation: mean %.6g  p95 %.6g  max %.6g  (%zu samples)\n",
+                remesher.deviationStats().mean, remesher.deviationStats().p95,
+                remesher.deviationStats().max, remesher.deviationStats().samples);
+        }
         printf("  uv: %s (%zu vt, %s), normals: %s\n",
             uvMode != "none" ? "yes" : "none", uvCorners, uvMode.c_str(),
             normals.empty() ? "no" : "yes");

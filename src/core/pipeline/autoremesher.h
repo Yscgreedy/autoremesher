@@ -21,6 +21,7 @@
  */
 #ifndef AUTO_REMESHER_AUTO_REMESHER_H
 #define AUTO_REMESHER_AUTO_REMESHER_H
+#include <AutoRemesher/Deviation>
 #include <AutoRemesher/MeshSymmetry>
 #include <AutoRemesher/Progress>
 #include <AutoRemesher/TopologyStats>
@@ -364,6 +365,18 @@ public:
         return m_symmetryStats;
     }
 
+    // Distance from the output vertices to the input surface.  Off by default: it
+    // builds a grid over every input triangle, which is real work on a dense mesh.
+    void setMeasureDeviation(bool enabled)
+    {
+        m_measureDeviation = enabled;
+    }
+
+    const DeviationStats& deviationStats() const
+    {
+        return m_deviation;
+    }
+
     // The phase report used to go straight to stderr from inside the library.
     // The application owns that decision now: a silent run turns it off, and a
     // caller that wants the report reads phaseReport()/phaseTimings() instead.
@@ -435,6 +448,8 @@ private:
     double m_symmetryPlane = 0.0;
     double m_symmetryTolerance = 0.002;
     SymmetryStats m_symmetryStats;
+    bool m_measureDeviation = false;
+    DeviationStats m_deviation;
     bool m_relativePositionTolerance = true;
     double m_islandAreaFraction = 0.0;
     bool m_weldPatches = false;

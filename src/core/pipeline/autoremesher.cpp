@@ -1280,6 +1280,10 @@ bool AutoRemesher::remesh()
         m_symmetryStats = SymmetryStats();
     }
 
+    m_deviation = DeviationStats();
+    if (m_measureDeviation)
+        m_deviation = measureDeviation(m_remeshedVertices, m_vertices, m_triangles);
+
     // Hole filling and patch selection used to be silent decisions made deep in
     // the extractor.  Sum what each island actually did so the caller can say
     // "3 holes filled, 1 left open, 2 patches dropped" instead of leaving the

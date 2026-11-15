@@ -23,11 +23,11 @@ remesh 产物做可复现的量化对比，并为 `docs/ARCH-REFACTOR-MERGE-PLAN
 | 解释器 | 版本 | numpy | 能否跑本工具 |
 |---|---|---|---|
 | 系统 `python` | 3.14.8 | **无** | ❌ `import numpy` 直接 `ModuleNotFoundError`（`mesh_metrics.py:34` / `test_metrics.py:16`） |
-| DSH 自带 | 3.12.14 | **2.3.5** | ✅ `test_metrics.py` 全绿（60/60） |
+| DSH 自带 | 3.12.14 | **2.3.5** | ✅ `test_metrics.py` 全绿（75/75） |
 
 ```bash
 PY="C:/Users/yschan/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe"
-PYTHONUTF8=1 "$PY" tools/metrics/test_metrics.py     # 期望：passed 60 / 60
+PYTHONUTF8=1 "$PY" tools/metrics/test_metrics.py     # 期望：passed 75 / 75
 ```
 
 Windows 控制台（cp936）下中文帮助会乱码，**必须**带 `PYTHONUTF8=1`（或 `PYTHONIOENCODING=utf-8`）：
@@ -107,6 +107,16 @@ python tools/metrics/mesh_metrics.py            # 无参：比较当前目录 ba
 | `degenerate_faces` | 面积 ≤ 1e-12·diag² 的面，或面内出现重复顶点下标的面 |
 | `valence_histogram` | 顶点价（入射唯一边数）直方图；四边网格最关键的局部质量指标 |
 | `valence4_ratio` / `irregular_vertices` | 价 4 顶点占比 / 非价 4 顶点数 |
+| `pole_expected_valence` | 期望价：四边为主取 4，三角为主取 6 |
+| `pole_count` / `interior_vertices` | **内部**（非边界）顶点中价 ≠ 期望价的个数 / 内部顶点数；边界顶点按设计就低价，不计入 |
+| `pole_ratio` / `pole_per_1000_faces` | pole 占内部顶点比例 / 每千面 pole 数 |
+| `poles_touching_boundary` | 与边界顶点相邻的 pole 数（贴边的 pole 往往是补洞/裁剪造成） |
+| `pole_clusters` / `pole_cluster_max` / `pole_isolated_ratio` | 以 2 倍中位边长为半径把 pole 聚成簇：簇数 / 最大簇 / 孤立（簇内只有自己）比例 |
+| `pole_nearest_p50_edges` / `p95_edges` | 每个 pole 到最近另一个 pole 的距离（p50/p95，单位=中位边长） |
+| `edge_loops` / `edge_loop_open_bands` | 连通闭合的 edge loop 数 / 在 pole 或边界处断开的链数 |
+| `edge_loop_closed_ratio` | 闭合占全部链的比例 |
+| `edge_loop_length_p50` / `_max` | 链长（边数）p50 / 最大 |
+| `edge_loop_turn_mean_deg` / `p95` / `max` | 沿链每步的转向角（相邻两条边方向夹角）；顺曲面的环小而稳，横切曲率的环大 |
 | `normal_inconsistent_edges` | 相邻面法向夹角 > 90° 的**面邻接对**数（流形网格即边数）。用于抓翻面/折叠；对非四边输入，> 90° 也可能是真实锐折（如耳廓、鼻孔） |
 | `max_dihedral_deg` | 观测到的最大相邻面法向夹角（180° = 完全翻转） |
 | `bbox` | 包围盒 min/max/size 与对角线 `diagonal`（仅统计被面引用的顶点） |
@@ -116,6 +126,18 @@ python tools/metrics/mesh_metrics.py            # 无参：比较当前目录 ba
 | `triangles_after_fan` | 扇形三角化后的三角面数（参考对比用同一口径） |
 | `unreferenced_vertices` | 未被任何面引用的顶点数（悬空点，通常应为 0） |
 | `parse_seconds` / `compute_seconds` / `total_seconds` | 解析 / 指标 / 全流程耗时 |
+
+### 3.0 pole 与 edge loop 的口径
+
+**pole**：内部顶点里价数不等于期望价的那些。四边网格期望 4、三角网格期望 6（按
+`quads >= 非四边面` 判定主导类型）。边界顶点一律不计：开放模型的边界价本来就低，
+算进去会让每个开口模型看起来满是 pole。簇与最近距离都以**中位边长**为单位，所以 26 cm
+的鞋和 2 m 的角色可以直接比。
+
+**edge loop**：从一条边出发，若两端顶点都是内部价 4 顶点，就沿"穿过顶点、不与来边共面"
+的那条边继续；遇到 pole、边界或已走过的边即终止。这是建模者说的"环在这里断了"。
+每步转向角 = 相邻两条边方向的夹角：贴着曲面的环每步几度，横切曲率的环每步几十度。
+只统计长度 ≥ 2 的链（价 3 顶点会让每条边都变成长度 1 的"伪环"）。
 
 ### 3.1 参考网格对比（`--ref`）
 
@@ -228,7 +250,7 @@ M0 冷基线或发布验收用全量（20–30 s）。
 ### 4.4 单元自检
 
 ```bash
-python tools/metrics/test_metrics.py     # 60/60 通过，退出码 0
+python tools/metrics/test_metrics.py     # 75/75 通过，退出码 0
 ```
 
 覆盖：OBJ 解析特性（n 边形/负索引/`v//vn`/首尾重复/多对象/1 基转换）、
@@ -337,7 +359,7 @@ python tools/metrics/mesh_metrics.py compare artifacts/baseline/ARTIFACT.json ar
 
 | 检查 | 命令 | 结果 |
 |---|---|---|
-| 自检 | `PYTHONUTF8=1 "$PY" tools/metrics/test_metrics.py` | `passed 60 / 60` |
+| 自检 | `PYTHONUTF8=1 "$PY" tools/metrics/test_metrics.py` | `passed 75 / 75` |
 | remesh 冒烟 | `autoremesher.exe --input body_vox.obj --output out_15k.obj --target-quads 15000 --sharp-edge 60 --adaptivity 0.3` | `quads 7961 / nonQuads 92 / vertices 8073 / 3.656 s` |
 | 度量冒烟 | `measure out_15k.obj --ref body_vox.obj --samples 20000 --json out_15k.metrics.json` | `quads=7961, non_quad_faces=92, components=1, largest=1.0, edges_non_manifold=4` |
 | 对比：有回归 | `compare out_15k.metrics.json out_3k.metrics.json` | `Verdict: REGRESSION`，退出码 **1**（`quad ratio drop 1.48 pp`、`deviation p95 +220.81%`） |

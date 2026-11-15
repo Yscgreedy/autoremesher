@@ -22,6 +22,7 @@
 #include <AutoRemesher/ConstrainedLeastSquares>
 #include <AutoRemesher/FrameField>
 #include <AutoRemesher/Parameterizer>
+#include <core/base/logging.h>
 #include <AutoRemesher/QuadParameterizer>
 #include <AutoRemesher/SingularitySimplifier>
 #include <AutoRemesher/SurfaceMesh>
@@ -31,6 +32,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <tbb/blocked_range.h>
 #include <tbb/combinable.h>
 #include <tbb/parallel_for.h>
@@ -358,7 +360,7 @@ bool Parameterizer::parameterize()
     // no attribute-backed interchange mesh is constructed.
     SurfaceMesh topology(*m_vertices, *m_triangles);
     if (topology.faceCount() != m_triangles->size()) {
-        std::cerr << "Topology rejected a non-triangle face" << std::endl;
+        Log::write(Log::Normal, "Topology rejected a non-triangle face\n");
         return false;
     }
 
@@ -369,11 +371,11 @@ bool Parameterizer::parameterize()
         field = *m_triangleFieldVectors;
     } else if (!FrameField::create(topology, m_sharpEdgeDegrees,
                    &field)) {
-        std::cerr << "Frame field solve failed" << std::endl;
+        Log::write(Log::Normal, "Frame field solve failed\n");
         return false;
     }
     if (field.size() != topology.faceCount()) {
-        std::cerr << "Frame field has the wrong face count" << std::endl;
+        Log::write(Log::Normal, "Frame field has the wrong face count\n");
         return false;
     }
 
@@ -409,7 +411,7 @@ bool Parameterizer::parameterize()
             &faceScalingField, &faceScalingU, &faceScalingV,
             m_targetQuadCount,
             coverProgress ? &coverProgress : nullptr)) {
-        std::cerr << "Quad cover solve failed" << std::endl;
+        Log::write(Log::Normal, "Quad cover solve failed\n");
         return false;
     }
     report(0.99f, "Collecting singularities");
@@ -424,11 +426,12 @@ bool Parameterizer::parameterize()
         m_singularVertexIndices.push_back(v);
     }
     if (simplifier.cancelledPairCount() > 0) {
-        std::cerr << "Simplified cross field singularities: "
-                  << simplifier.singularityCountBefore() << " -> "
-                  << simplifier.singularityCountAfter() << " ("
-                  << simplifier.cancelledPairCount() << " pair(s) cancelled)"
-                  << std::endl;
+        std::ostringstream message;
+        message << "Simplified cross field singularities: "
+                << simplifier.singularityCountBefore() << " -> "
+                << simplifier.singularityCountAfter() << " ("
+                << simplifier.cancelledPairCount() << " pair(s) cancelled)\n";
+        Log::write(Log::Debug, message.str());
     }
     report(1.0f, "");
     return true;

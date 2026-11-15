@@ -7,7 +7,9 @@
  * the Go GUI can drive it without any Qt code in the process.
  */
 #include <AutoRemesher/AutoRemesher>
+#include <AutoRemesher/Vector2>
 #include <AutoRemesher/Vector3>
+#include <core/base/logging.h>
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -101,14 +104,24 @@ std::string displayPath(const std::string& path)
 struct Options {
     std::string input;
     std::string output;
+    std::string preset = "organic";
     size_t targetQuads = 20000;
     double adaptivity = 0.5;
     double anisotropy = 0.0;
     double sharpEdgeDegrees = 60.0;
     double smoothNormalDegrees = 0.0;
     double edgeScaling = 1.0;
-    bool hardSurface = false;
-    bool exactTargetQuads = false;
+    // A preset fills in the knobs the command line did not name, so an explicit
+    // --sharp-edge always wins no matter where it sits relative to --preset.
+    bool adaptivitySet = false;
+    bool anisotropySet = false;
+    bool sharpEdgeSet = false;
+    bool smoothNormalSet = false;
+    bool edgeScalingSet = false;
+    // Solving the cover scale from the budget is the default: a slider that says
+    // 20k and lands at 14.7k reads as a bug.  --legacy-target-quads restores the
+    // historical average-edge-length path, which is what old scripts pinned.
+    bool exactTargetQuads = true;
     bool relativeTolerance = true;
     double keepIslandFraction = 0.0;
     bool weldPatches = false;
@@ -116,11 +129,61 @@ struct Options {
     bool projectedCaps = false;
     bool localRemesh = false;
     int threads = 0;
+    bool writeUvs = true;
+    bool writeNormals = true;
+    int logLevel = 1; // 0 = silent, 1 = normal, 2 = debug (core Log::Level order)
     bool json = false;
     bool progress = false;
     bool verbose = false;
     bool quiet = false;
 };
+
+// A preset is a name for one point in the four-knob space, because "organic"
+// and "hard-surface" are what a user actually thinks in.  The organic point is
+// the historical default, so a plain run without --preset keeps producing the
+// same quads byte for byte.
+struct Preset {
+    const char* name;
+    double sharpEdgeDegrees;
+    double smoothNormalDegrees;
+    double adaptivity;
+    double anisotropy;
+    double edgeScaling;
+};
+
+const Preset kPresets[] = {
+    { "organic", 60.0, 0.0, 0.5, 0.0, 1.0 },
+    // Hard surface: keep creases (a lower sharp threshold marks more edges
+    // sharp), smooth normals only across shallow blends, and let the density
+    // follow curvature less, because flat panels should stay evenly dense.
+    { "hard-surface", 40.0, 30.0, 0.2, 0.0, 1.0 },
+};
+
+const Preset* findPreset(const std::string& name)
+{
+    for (const Preset& preset : kPresets) {
+        if (name == preset.name)
+            return &preset;
+    }
+    return nullptr;
+}
+
+void applyPreset(Options* options)
+{
+    const Preset* preset = findPreset(options->preset);
+    if (nullptr == preset)
+        return;
+    if (!options->sharpEdgeSet)
+        options->sharpEdgeDegrees = preset->sharpEdgeDegrees;
+    if (!options->smoothNormalSet)
+        options->smoothNormalDegrees = preset->smoothNormalDegrees;
+    if (!options->adaptivitySet)
+        options->adaptivity = preset->adaptivity;
+    if (!options->anisotropySet)
+        options->anisotropy = preset->anisotropy;
+    if (!options->edgeScalingSet)
+        options->edgeScaling = preset->edgeScaling;
+}
 
 const char* kUsage =
     "AutoRemesher " AR_VERSION " - automatic quad remeshing (headless)\n"
@@ -131,16 +194,25 @@ const char* kUsage =
     "Input / output:\n"
     "  -i, --input PATH            input OBJ (polygons are triangulated)\n"
     "  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)\n"
+    "      --no-uv                 do not write vt lines\n"
+    "      --no-normals            do not write vn lines\n"
     "\n"
     "Remeshing:\n"
-    "  -q, --target-quads N        requested quad count (default 20000)\n"
+    "  -q, --target-quads N        requested quad count (default 20000); the\n"
+    "                              cover scale is solved from this budget, so the\n"
+    "                              result lands within about +/-5%\n"
     "      --adaptivity F          gradient adaptivity 0..1 (default 0.5)\n"
     "      --anisotropy F          anisotropy 0..1 (default 0.0)\n"
     "      --sharp-edge DEG        sharp edge threshold (default 60)\n"
     "      --smooth-normal DEG     smooth normal threshold (default 0)\n"
     "      --edge-scaling F        edge scale multiplier (default 1.0)\n"
-    "      --model-type T          organic | hard-surface (default organic)\n"
+    "      --preset P              organic | hard-surface: fills every knob the\n"
+    "                              command line did not set (default organic)\n"
+    "      --model-type T          alias of --preset, kept for old scripts\n"
     "      --exact-target-quads    solve the cover scale from the quad budget\n"
+    "                              (default; kept so old scripts still parse)\n"
+    "      --legacy-target-quads   take the scale from the average edge length\n"
+    "                              instead; the count then lands around 0.7N..1.05N\n"
     "      --absolute-tolerance    legacy fixed 1e-5 weld (default: relative)\n"
     "      --keep-island-fraction F  keep patches above this area share (default 0)\n"
     "      --keep-all-islands      keep every extracted patch\n"
@@ -153,8 +225,11 @@ const char* kUsage =
     "\n"
     "Reporting:\n"
     "      --json                  JSON-lines events on stdout (see docs/cli-protocol.md)\n"
+    "                              result carries topology, holes, patches, phases\n"
     "      --progress              progress on stderr\n"
     "      --verbose               per-phase report at the end\n"
+    "      --log-level L           quiet | normal | debug (default normal);\n"
+    "                              debug adds the per-step and per-hole traces\n"
     "      --quiet                 no human output except errors\n"
     "  -h, --help                  this text\n"
     "  -v, --version               version\n"
@@ -210,27 +285,38 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->targetQuads = static_cast<size_t>(std::max(1.0, parsed));
         } else if (arg == "--adaptivity") {
             options->adaptivity = number();
+            options->adaptivitySet = true;
         } else if (arg == "--anisotropy") {
             options->anisotropy = number();
+            options->anisotropySet = true;
         } else if (arg == "--sharp-edge") {
             options->sharpEdgeDegrees = number();
+            options->sharpEdgeSet = true;
         } else if (arg == "--smooth-normal") {
             options->smoothNormalDegrees = number();
+            options->smoothNormalSet = true;
         } else if (arg == "--edge-scaling") {
             options->edgeScaling = number();
-        } else if (arg == "--model-type") {
-            const std::string type = value();
-            if (type == "hard-surface" || type == "hardsurface" || type == "hard") {
-                options->hardSurface = true;
-            } else if (type == "organic" || type.empty()) {
-                options->hardSurface = false;
-            } else {
-                fprintf(stderr, "unknown model type '%s'\n", type.c_str());
+            options->edgeScalingSet = true;
+        } else if (arg == "--preset" || arg == "--model-type") {
+            std::string type = value();
+            if (type.empty())
+                type = "organic";
+            if (type == "hardsurface" || type == "hard")
+                type = "hard-surface";
+            if (nullptr == findPreset(type)) {
+                fprintf(stderr, "unknown preset '%s' (known:", type.c_str());
+                for (const Preset& preset : kPresets)
+                    fprintf(stderr, " %s", preset.name);
+                fprintf(stderr, ")\n");
                 *exitCode = 1;
                 return false;
             }
+            options->preset = type;
         } else if (arg == "--exact-target-quads") {
             options->exactTargetQuads = true;
+        } else if (arg == "--legacy-target-quads") {
+            options->exactTargetQuads = false;
         } else if (arg == "--absolute-tolerance") {
             options->relativeTolerance = false;
         } else if (arg == "--relative-tolerance") {
@@ -251,6 +337,10 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->localRemesh = true;
         } else if (arg == "--threads") {
             options->threads = static_cast<int>(number());
+        } else if (arg == "--no-uv") {
+            options->writeUvs = false;
+        } else if (arg == "--no-normals") {
+            options->writeNormals = false;
         } else if (arg == "--json") {
             options->json = true;
         } else if (arg == "--progress") {
@@ -259,6 +349,23 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->verbose = true;
         } else if (arg == "--quiet") {
             options->quiet = true;
+            options->logLevel = 0;
+        } else if (arg == "--log-level") {
+            const std::string level = value();
+            if (level == "quiet" || level == "silent") {
+                options->quiet = true;
+                options->logLevel = 0;
+            } else if (level == "normal" || level.empty()) {
+                options->quiet = false;
+                options->logLevel = 1;
+            } else if (level == "debug" || level == "verbose") {
+                options->quiet = false;
+                options->logLevel = 2;
+            } else {
+                fprintf(stderr, "unknown log level '%s' (quiet|normal|debug)\n", level.c_str());
+                *exitCode = 1;
+                return false;
+            }
         } else if (!arg.empty() && arg[0] == '-') {
             fprintf(stderr, "unknown option '%s'\n", arg.c_str());
             *exitCode = 1;
@@ -280,6 +387,9 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
         *exitCode = 1;
         return false;
     }
+    // Presets are resolved last so an explicit knob always beats the preset,
+    // whatever order the flags appeared in.
+    applyPreset(options);
     return true;
 }
 
@@ -370,9 +480,46 @@ bool loadObj(const std::string& path,
     return true;
 }
 
+// Area weighted vertex normals: a quad contributes one Newell normal to each of
+// its corners, so a vertex on a flat panel is not dragged around by a sliver.
+std::vector<AutoRemesher::Vector3> computeVertexNormals(
+    const std::vector<AutoRemesher::Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& faces)
+{
+    std::vector<AutoRemesher::Vector3> normals(vertices.size());
+    for (const auto& face : faces) {
+        if (face.size() < 3)
+            continue;
+        AutoRemesher::Vector3 normal;
+        for (size_t i = 0; i < face.size(); ++i) {
+            const size_t next = (i + 1) % face.size();
+            if (face[i] >= vertices.size() || face[next] >= vertices.size())
+                continue;
+            const AutoRemesher::Vector3& current = vertices[face[i]];
+            const AutoRemesher::Vector3& following = vertices[face[next]];
+            normal = normal + AutoRemesher::Vector3(
+                                   (current.y() - following.y()) * (current.z() + following.z()),
+                                   (current.z() - following.z()) * (current.x() + following.x()),
+                                   (current.x() - following.x()) * (current.y() + following.y()));
+        }
+        for (const size_t corner : face) {
+            if (corner < normals.size())
+                normals[corner] = normals[corner] + normal;
+        }
+    }
+    for (auto& normal : normals) {
+        const double length = normal.length();
+        if (length > 0.0)
+            normal = normal * (1.0 / length);
+    }
+    return normals;
+}
+
 bool writeObj(const std::string& path,
     const std::vector<AutoRemesher::Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
+    const std::vector<std::vector<AutoRemesher::Vector2>>& faceUvs,
+    const std::vector<AutoRemesher::Vector3>& normals,
     std::string* error)
 {
     FILE* file = fopen(path.c_str(), "wb");
@@ -380,16 +527,44 @@ bool writeObj(const std::string& path,
         *error = "failed to write " + displayPath(path);
         return false;
     }
+    // UVs are per corner: a quad takes the chart of its own centroid, so the
+    // corners belong to that face's parameterization, not to a shared vertex.
+    const bool hasUvs = faceUvs.size() == faces.size() && !faces.empty();
+    const bool hasNormals = normals.size() == vertices.size() && !vertices.empty();
     fprintf(file, "# AutoRemesher %s\n", AR_VERSION);
     for (const auto& vertex : vertices)
         fprintf(file, "v %.17g %.17g %.17g\n", vertex.x(), vertex.y(), vertex.z());
-    for (const auto& face : faces) {
+    if (hasUvs) {
+        for (const auto& quadUvs : faceUvs) {
+            for (const auto& uv : quadUvs)
+                fprintf(file, "vt %.17g %.17g\n", uv.x(), uv.y());
+        }
+    }
+    if (hasNormals) {
+        for (const auto& normal : normals)
+            fprintf(file, "vn %.17g %.17g %.17g\n", normal.x(), normal.y(), normal.z());
+    }
+    size_t nextUv = 1;
+    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+        const auto& face = faces[faceIndex];
         if (face.size() < 3)
             continue;
+        const bool faceHasUvs = hasUvs && faceUvs[faceIndex].size() == face.size();
         fputc('f', file);
-        for (const size_t index : face)
-            fprintf(file, " %zu", index + 1);
+        for (size_t corner = 0; corner < face.size(); ++corner) {
+            const size_t vertexIndex = face[corner] + 1;
+            if (faceHasUvs && hasNormals)
+                fprintf(file, " %zu/%zu/%zu", vertexIndex, nextUv + corner, vertexIndex);
+            else if (faceHasUvs)
+                fprintf(file, " %zu/%zu", vertexIndex, nextUv + corner);
+            else if (hasNormals)
+                fprintf(file, " %zu//%zu", vertexIndex, vertexIndex);
+            else
+                fprintf(file, " %zu", vertexIndex);
+        }
         fputc('\n', file);
+        if (faceHasUvs)
+            nextUv += face.size();
     }
     if (0 != fclose(file)) {
         *error = "failed while writing " + displayPath(path);
@@ -479,6 +654,119 @@ std::string errorEvent(const std::string& message)
     return "{\"type\":\"error\",\"message\":\"" + jsonEscape(message) + "\"}";
 }
 
+void stderrLogSink(int level, const char* message)
+{
+    (void)level;
+    if (nullptr == message)
+        return;
+    fputs(message, stderr);
+    fflush(stderr);
+}
+
+std::string topologyJson(const AutoRemesher::TopologyStats& stats)
+{
+    std::ostringstream out;
+    out << "{\"vertices\":" << stats.vertices
+        << ",\"faces\":" << stats.faces
+        << ",\"quads\":" << stats.quads
+        << ",\"nonQuads\":" << stats.nonQuads
+        << ",\"triangles\":" << stats.triangles
+        << ",\"boundaryEdges\":" << stats.boundaryEdges
+        << ",\"boundaryLoops\":" << stats.boundaryLoops
+        << ",\"nonManifoldEdges\":" << stats.nonManifoldEdges
+        << ",\"components\":" << stats.components
+        << ",\"degenerateFaces\":" << stats.degenerateFaces
+        << "}";
+    return out.str();
+}
+
+std::string phasesJson(const std::vector<AutoRemesher::PhaseTiming>& timings)
+{
+    std::ostringstream out;
+    out << '[';
+    for (size_t i = 0; i < timings.size(); ++i) {
+        if (i)
+            out << ',';
+        out << "{\"name\":\"" << jsonEscape(timings[i].name) << "\",\"ms\":"
+            << std::fixed << std::setprecision(3) << timings[i].milliseconds
+            << ",\"accumulated\":" << (timings[i].accumulated ? "true" : "false") << "}";
+    }
+    out << ']';
+    return out.str();
+}
+
+// Warnings are the part that used to be missing entirely: the pipeline knew it
+// was handed a shell with thousands of boundary edges, and said nothing.
+void emitWarning(const Options& options, const char* code, const std::string& message, long long value)
+{
+    if (options.json) {
+        std::ostringstream line;
+        line << "{\"type\":\"warning\",\"code\":\"" << jsonEscape(code) << "\",\"value\":"
+             << value << ",\"message\":\"" << jsonEscape(message) << "\"}";
+        emitLine(line.str());
+    }
+    if (!options.quiet)
+        fprintf(stderr, "warning: %s\n", message.c_str());
+}
+
+void reportInputHealth(const Options& options, const AutoRemesher::TopologyStats& stats)
+{
+    if (stats.boundaryEdges > 0) {
+        std::ostringstream message;
+        message << "input has " << stats.boundaryEdges << " boundary edge(s) in "
+                << stats.boundaryLoops << " loop(s); remeshing does not stitch input boundaries, "
+                << "so the output keeps a boundary there";
+        emitWarning(options, "input_open_boundary", message.str(), (long long)stats.boundaryEdges);
+    }
+    if (stats.nonManifoldEdges > 0) {
+        std::ostringstream message;
+        message << "input has " << stats.nonManifoldEdges
+                << " non-manifold edge(s) (more than two faces); faces around them may be dropped";
+        emitWarning(options, "input_non_manifold", message.str(), (long long)stats.nonManifoldEdges);
+    }
+    if (stats.components > 1) {
+        std::ostringstream message;
+        message << "input has " << stats.components
+                << " disconnected component(s); each is remeshed as its own island and dropped "
+                << "unless --keep-island-fraction or --keep-all-islands is given";
+        emitWarning(options, "input_multiple_components", message.str(), (long long)stats.components);
+    }
+    if (stats.degenerateFaces > 0) {
+        std::ostringstream message;
+        message << "input has " << stats.degenerateFaces
+                << " degenerate face(s) (repeated vertex index or zero area)";
+        emitWarning(options, "input_degenerate_faces", message.str(), (long long)stats.degenerateFaces);
+    }
+}
+
+void reportTargetHealth(const Options& options, size_t requested, size_t actual,
+    const AutoRemesher::HoleStats& holes)
+{
+    if (holes.ignored > 0) {
+        std::ostringstream message;
+        message << holes.ignored
+                << " hole(s) were left open: a boundary loop longer than 65 edges is only sealed "
+                << "with --projected-caps";
+        emitWarning(options, "holes_left_open", message.str(), (long long)holes.ignored);
+    }
+    if (requested > 0) {
+        const double error = ((double)actual - (double)requested) / (double)requested;
+        if (std::fabs(error) > 0.10) {
+            std::ostringstream message;
+            message.setf(std::ios::fixed);
+            message.precision(1);
+            message << "actual quads " << actual << " vs requested " << requested
+                    << " (" << (error * 100.0) << "%)";
+            if (options.exactTargetQuads)
+                message << "; the exact path missed its +/-5% window on this input";
+            else
+                message << "; --exact-target-quads solves the cover scale from the budget "
+                        << "and lands within about +/-5%";
+            emitWarning(options, "target_quads_off", message.str(), (long long)actual);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -489,6 +777,14 @@ int main(int argc, char** argv)
         return exitCode;
     if (options.output.empty())
         options.output = defaultOutputPath(options.input);
+
+    // The core library no longer writes to stderr on its own: this sink is what
+    // turns its phase report and debug traces into lines the CLI owns, so
+    // --quiet can be quiet and --verbose can print exactly once.
+    AutoRemesher::Log::setSink(&stderrLogSink);
+    AutoRemesher::Log::setLevel(options.quiet ? AutoRemesher::Log::Silent
+                                              : (options.logLevel >= 2 ? AutoRemesher::Log::Debug
+                                                                       : AutoRemesher::Log::Normal));
 
     std::vector<AutoRemesher::Vector3> vertices;
     std::vector<std::vector<size_t>> triangles;
@@ -506,16 +802,19 @@ int main(int argc, char** argv)
         fprintf(stderr, "  input: %s (%zu vertices, %zu triangles)\n",
             displayPath(options.input).c_str(), vertices.size(), triangles.size());
         fprintf(stderr, "  output: %s\n", displayPath(options.output).c_str());
-        fprintf(stderr, "  target quads: %zu\n", options.targetQuads);
+        fprintf(stderr, "  target quads: %zu, preset: %s%s\n", options.targetQuads,
+            options.preset.c_str(), options.exactTargetQuads ? ", exact target" : "");
     }
     if (options.json) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer),
             "{\"type\":\"start\",\"version\":\"%s\",\"input\":\"%s\",\"output\":\"%s\","
-            "\"targetQuads\":%zu,\"vertices\":%zu,\"triangles\":%zu}",
+            "\"targetQuads\":%zu,\"vertices\":%zu,\"triangles\":%zu,\"preset\":\"%s\","
+            "\"exactTargetQuads\":%s}",
             AR_VERSION, jsonEscape(displayPath(options.input)).c_str(),
             jsonEscape(displayPath(options.output)).c_str(), options.targetQuads,
-            vertices.size(), triangles.size());
+            vertices.size(), triangles.size(), jsonEscape(options.preset).c_str(),
+            options.exactTargetQuads ? "true" : "false");
         emitLine(buffer);
     }
 
@@ -537,11 +836,24 @@ int main(int argc, char** argv)
     remesher.setGradedHoleFilling(options.gradedHoles);
     remesher.setProjectedHoleCaps(options.projectedCaps);
     remesher.setLocalRemesh(options.localRemesh);
-    remesher.setModelType(options.hardSurface ? AutoRemesher::ModelType::HardSurface
-                                              : AutoRemesher::ModelType::Organic);
+    remesher.setExportUvs(options.writeUvs);
+    // --verbose prints the report itself below, so the library must not print it
+    // a second time; --quiet suppresses it entirely.
+    remesher.setReportEnabled(!options.quiet && !options.verbose);
     if (options.json || options.progress) {
         remesher.setProgressHandler(reportProgress);
         remesher.setTag(&sink);
+    }
+
+    // Describe the input before spending minutes on it.  A shell with thousands
+    // of boundary edges is going to keep a boundary; the run says so up front
+    // instead of leaving it to be discovered in another tool afterwards.
+    remesher.analyzeInput();
+    reportInputHealth(options, remesher.inputStats());
+    if (options.json) {
+        std::ostringstream event;
+        event << "{\"type\":\"input\",\"topology\":" << topologyJson(remesher.inputStats()) << "}";
+        emitLine(event.str());
     }
 
     // One scheduler for the whole run: this is how --threads is pinned.
@@ -565,7 +877,7 @@ int main(int argc, char** argv)
         fputc('\n', stderr);
 
     if (!remeshed) {
-        const std::string message = "remeshing failed";
+        const std::string message = remesher.lastError().empty() ? "remeshing failed" : remesher.lastError();
         if (options.json)
             emitLine(errorEvent(message));
         fprintf(stderr, "error: %s\n", message.c_str());
@@ -581,7 +893,17 @@ int main(int argc, char** argv)
             ++nonQuads;
     }
 
-    if (!writeObj(options.output, remesher.remeshedVertices(), remesher.remeshedQuads(), &error)) {
+    const std::vector<std::vector<AutoRemesher::Vector2>>& faceUvs = remesher.remeshedFaceUvs();
+    const bool hasUvs = faceUvs.size() == remesher.remeshedQuads().size() && !faceUvs.empty();
+    size_t uvCorners = 0;
+    for (const auto& quadUvs : faceUvs)
+        uvCorners += quadUvs.size();
+    std::vector<AutoRemesher::Vector3> normals;
+    if (options.writeNormals)
+        normals = computeVertexNormals(remesher.remeshedVertices(), remesher.remeshedQuads());
+
+    if (!writeObj(options.output, remesher.remeshedVertices(), remesher.remeshedQuads(),
+            faceUvs, normals, &error)) {
         if (options.json)
             emitLine(errorEvent(error));
         fprintf(stderr, "error: %s\n", error.c_str());
@@ -597,18 +919,57 @@ int main(int argc, char** argv)
         }
     }
 
+    reportTargetHealth(options, options.targetQuads, quads, remesher.holeStats());
+
+    const double quadsError = (options.targetQuads > 0)
+        ? ((double)quads - (double)options.targetQuads) / (double)options.targetQuads
+        : 0.0;
+    const AutoRemesher::TopologyStats& outputStats = remesher.outputStats();
+    const AutoRemesher::HoleStats& holes = remesher.holeStats();
+    const AutoRemesher::PatchStats& patches = remesher.patchStats();
+
     if (options.json) {
-        char buffer[1024];
-        snprintf(buffer, sizeof(buffer),
-            "{\"type\":\"result\",\"output\":\"%s\",\"seconds\":%.3f,\"vertices\":%zu,"
-            "\"quads\":%zu,\"nonQuads\":%zu,\"triangles\":%zu}",
-            jsonEscape(displayPath(options.output)).c_str(), seconds,
-            remesher.remeshedVertices().size(), quads, nonQuads, triangles.size());
-        emitLine(buffer);
+        std::ostringstream payload;
+        payload.setf(std::ios::fixed);
+        payload << "{\"type\":\"result\",\"output\":\"" << jsonEscape(displayPath(options.output)) << "\""
+                << ",\"seconds\":" << std::setprecision(3) << seconds
+                << ",\"vertices\":" << remesher.remeshedVertices().size()
+                << ",\"quads\":" << quads
+                << ",\"nonQuads\":" << nonQuads
+                << ",\"triangles\":" << triangles.size()
+                << ",\"requestedQuads\":" << options.targetQuads
+                << ",\"quadsError\":" << std::setprecision(4) << quadsError
+                << ",\"exactTargetQuads\":" << (options.exactTargetQuads ? "true" : "false")
+                << ",\"preset\":\"" << jsonEscape(options.preset) << "\""
+                << ",\"islands\":" << remesher.islandCount()
+                << ",\"coresBusy\":" << std::setprecision(2) << remesher.coresBusy()
+                << ",\"topology\":{\"input\":" << topologyJson(remesher.inputStats())
+                << ",\"output\":" << topologyJson(outputStats) << "}"
+                << ",\"holes\":{\"filled\":" << holes.filled
+                << ",\"ignored\":" << holes.ignored
+                << ",\"facesAdded\":" << holes.facesAdded << "}"
+                << ",\"patches\":{\"kept\":" << patches.kept
+                << ",\"dropped\":" << patches.dropped << "}"
+                << ",\"uvs\":" << (hasUvs ? "true" : "false")
+                << ",\"uvCorners\":" << uvCorners
+                << ",\"normals\":" << (normals.empty() ? "false" : "true")
+                << ",\"phases\":" << phasesJson(remesher.phaseTimings())
+                << "}";
+        emitLine(payload.str());
     } else if (!options.quiet) {
         printf("result: %s\n", displayPath(options.output).c_str());
-        printf("  %.3f s, %zu vertices, %zu quads, %zu non-quads\n",
-            seconds, remesher.remeshedVertices().size(), quads, nonQuads);
+        printf("  %.3f s, %zu vertices, %zu quads, %zu non-quads (requested %zu, %+.1f%%)\n",
+            seconds, remesher.remeshedVertices().size(), quads, nonQuads,
+            options.targetQuads, quadsError * 100.0);
+        printf("  topology: %zu boundary edge(s) in %zu loop(s), %zu non-manifold edge(s), %zu component(s)\n",
+            outputStats.boundaryEdges, outputStats.boundaryLoops,
+            outputStats.nonManifoldEdges, outputStats.components);
+        printf("  uv: %s (%zu corners), normals: %s\n",
+            hasUvs ? "yes" : "none", uvCorners, normals.empty() ? "no" : "yes");
+        if (holes.filled > 0 || holes.ignored > 0 || patches.dropped > 0) {
+            printf("  holes: %zu filled, %zu left open (+%zu faces); patches: %zu kept, %zu dropped\n",
+                holes.filled, holes.ignored, holes.facesAdded, patches.kept, patches.dropped);
+        }
     }
     return 0;
 }

@@ -203,6 +203,35 @@
     });
   }
 
+  // The preset dropdown is the front door to the four remeshing knobs: picking
+  // one moves the sliders to that preset's values, exactly the table the CLI
+  // applies when a flag is left out.  Moving a slider afterwards still wins.
+  var PRESETS = {
+    organic: { sharpEdge: 60, smoothNormal: 0, adaptivity: 0.5, anisotropy: 0, edgeScaling: 1 },
+    'hard-surface': { sharpEdge: 40, smoothNormal: 30, adaptivity: 0.2, anisotropy: 0, edgeScaling: 1 }
+  };
+
+  function setParamValue(name, value) {
+    var row = document.querySelector('.row[data-param="' + name + '"]');
+    if (!row) return;
+    var num = row.querySelector('.num');
+    if (!num) return;
+    num.value = String(value);
+    num.dispatchEvent(new Event('input'));
+  }
+
+  function initPresets() {
+    var row = document.querySelector('.row[data-param="modelType"]');
+    if (!row) return;
+    var sel = row.querySelector('.sel');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      var preset = PRESETS[sel.value];
+      if (!preset) return;
+      Object.keys(preset).forEach(function (name) { setParamValue(name, preset[name]); });
+    });
+  }
+
   function collectParams() {
     var out = { inputId: state.input ? state.input.id : '' };
     Object.keys(params).forEach(function (k) { out[k] = params[k]; });
@@ -550,6 +579,7 @@
   // ------------------------------------------------------------------- boot
   function boot() {
     initParams();
+initPresets();
     busy(false);
     fetch(api('/api/info'), { headers: { 'X-AR-Token': TOKEN } })
       .then(function (r) {

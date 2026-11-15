@@ -22,7 +22,9 @@
 #ifndef AUTO_REMESHER_AUTO_REMESHER_H
 #define AUTO_REMESHER_AUTO_REMESHER_H
 #include <AutoRemesher/Progress>
+#include <AutoRemesher/TopologyStats>
 #include <AutoRemesher/Vector3>
+#include <core/geom/topologystats.h>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -37,12 +39,31 @@ namespace AutoRemesher {
 
 class IsotropicRemesher;
 
-enum class ModelType {
-    Organic,
-    HardSurface
+typedef void (*AutoRemesherProgressHandler)(void* tag, float progress, const char* status);
+
+// What hole filling and patch selection actually did, summed over the islands.
+// Both are decisions the extractor used to make silently: a hole longer than the
+// graded limit is left open, and every extracted patch but the largest is
+// dropped unless the caller asked to keep it.
+struct HoleStats {
+    size_t filled = 0;
+    size_t ignored = 0;
+    size_t facesAdded = 0;
 };
 
-typedef void (*AutoRemesherProgressHandler)(void* tag, float progress, const char* status);
+struct PatchStats {
+    size_t kept = 0;
+    size_t dropped = 0;
+};
+
+// One entry of the phase report, machine readable.  accumulated figures are
+// summed over islands, so accumulated / wall clock is the parallelism a phase
+// actually reached.
+struct PhaseTiming {
+    std::string name;
+    double milliseconds = 0.0;
+    bool accumulated = false;
+};
 
 class AutoRemesher {
 public:
@@ -71,11 +92,6 @@ public:
     void setTag(void* tag)
     {
         m_tag = tag;
-    }
-
-    void setModelType(ModelType modelType)
-    {
-        m_modelType = modelType;
     }
 
     void setGradientAdaptivity(double adaptivity)
@@ -147,6 +163,23 @@ public:
     const std::vector<Vector3>& remeshedVertices()
     {
         return m_remeshedVertices;
+    }
+
+    // One UV pair per corner of every remeshed quad, in the same order as
+    // remeshedQuads(); empty when the transfer could not cover every island.
+    // A face takes its chart from its own centroid, so a cover seam falls between
+    // faces instead of through them; islands are laid out side by side, so the
+    // UV space does not overlap itself.
+    const std::vector<std::vector<Vector2>>& remeshedFaceUvs()
+    {
+        return m_remeshedFaceUvs;
+    }
+
+    // UV transfer costs one grid build per island; turn it off for a run that
+    // only needs the geometry.
+    void setExportUvs(bool enabled)
+    {
+        m_exportUvs = enabled;
     }
 
     const std::vector<std::vector<size_t>>& remeshedQuads()
@@ -229,6 +262,71 @@ public:
         return m_phaseReport;
     }
 
+    // Machine readable twin of phaseReport().  Same steps, same order, but with
+    // the number already parsed out of the string.
+    const std::vector<PhaseTiming>& phaseTimings() const
+    {
+        return m_phaseTimings;
+    }
+
+    // Topology of the mesh the caller handed in and of the quads that came out.
+    // The input side is what tells a caller "this shell has 5950 boundary edges
+    // and 1 hole", which the pipeline used to know nothing about.
+    // Count the input topology up front, so an application can warn before a run
+    // that takes minutes.  remesh() reuses the result instead of counting twice.
+    void analyzeInput();
+
+    const TopologyStats& inputStats() const
+    {
+        return m_inputStats;
+    }
+
+    // Wall clock of the input analysis, whether the application ran it early
+    // (analyzeInput) or remesh() had to do it.  The phase report quotes this, so
+    // a caller that checks health up front does not see a fake 0.0 ms step.
+    double inputAnalysisMilliseconds() const
+    {
+        return m_inputAnalysisMilliseconds;
+    }
+
+    const TopologyStats& outputStats() const
+    {
+        return m_outputStats;
+    }
+
+    size_t islandCount() const
+    {
+        return m_islandCount;
+    }
+
+    double coresBusy() const
+    {
+        return m_coresBusy;
+    }
+
+    const HoleStats& holeStats() const
+    {
+        return m_holeStats;
+    }
+
+    const PatchStats& patchStats() const
+    {
+        return m_patchStats;
+    }
+
+    const std::string& lastError() const
+    {
+        return m_lastError;
+    }
+
+    // The phase report used to go straight to stderr from inside the library.
+    // The application owns that decision now: a silent run turns it off, and a
+    // caller that wants the report reads phaseReport()/phaseTimings() instead.
+    void setReportEnabled(bool enabled)
+    {
+        m_reportEnabled = enabled;
+    }
+
     static const double m_defaultSharpEdgeDegrees;
 
     // Per-island durations are accumulated in microseconds: a mesh split into
@@ -246,6 +344,7 @@ private:
     std::vector<Vector3> m_vertices;
     std::vector<std::vector<size_t>> m_triangles;
     std::vector<Vector3> m_remeshedVertices;
+    std::vector<std::vector<Vector2>> m_remeshedFaceUvs;
     std::vector<std::vector<size_t>> m_remeshedQuads;
     std::vector<Vector3> m_decimatedVertices;
     std::vector<std::vector<size_t>> m_decimatedTriangles;
@@ -282,13 +381,24 @@ private:
     double m_sharpEdgeDegrees = m_defaultSharpEdgeDegrees;
     double m_smoothNormalDegrees = 0.0;
     bool m_exactTargetQuads = false;
+    bool m_exportUvs = true;
     bool m_relativePositionTolerance = true;
     double m_islandAreaFraction = 0.0;
     bool m_weldPatches = false;
     bool m_gradedHoleFilling = true;
     bool m_projectedHoleCaps = false;
     bool m_localRemesh = false;
-    ModelType m_modelType = ModelType::Organic;
+    TopologyStats m_inputStats;
+    TopologyStats m_outputStats;
+    bool m_inputAnalyzed = false;
+    double m_inputAnalysisMilliseconds = 0.0;
+    HoleStats m_holeStats;
+    PatchStats m_patchStats;
+    std::vector<PhaseTiming> m_phaseTimings;
+    size_t m_islandCount = 0;
+    double m_coresBusy = 0.0;
+    std::string m_lastError;
+    bool m_reportEnabled = true;
     AutoRemesherProgressHandler m_progressHandler = nullptr;
     void* m_tag = nullptr;
 

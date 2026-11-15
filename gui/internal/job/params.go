@@ -55,6 +55,11 @@ func DefaultParams() Params {
 		ModelType:    ModelOrganic,
 		Threads:      0,
 		EdgeScaling:  1.0,
+		// The default path lands anywhere from 0.7x to 1.05x of the requested
+		// count; the exact solve keeps it within about +/-5%, which is the
+		// number a GUI slider implies.  The CLI flag stays opt-in so scripts
+		// keep the historical output byte for byte.
+		ExactTargetQuads: true,
 	}
 }
 

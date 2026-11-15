@@ -200,11 +200,13 @@ const char* kUsage =
     "  -o, --output PATH           output OBJ of quads (default: <input>_remeshed.obj)\n"
     "      --no-uv                 do not write vt lines\n"
     "      --no-normals            do not write vn lines\n"
-    "      --uv-mode M             corner | vertex | hybrid (default corner):\n"
+    "      --uv-mode M             corner | vertex | hybrid | seam (default corner):\n"
     "                              corner lays one UV per face corner from the cover\n"
     "                              chart, vertex shares the extractor's per-vertex\n"
     "                              UVs, hybrid uses corners only for faces the vertex\n"
-    "                              UVs would stretch across a seam\n"
+    "                              UVs would stretch, seam cuts the mesh along the\n"
+    "                              chart boundaries so per-vertex UVs can describe\n"
+    "                              them exactly\n"
     "      --symmetry AXIS         x | y | z: snap the output onto its own mirror\n"
     "                              plane where both sides agree, and count where\n"
     "                              they do not (default off)\n"
@@ -374,7 +376,7 @@ bool parseArgs(int argc, char** argv, Options* options, int* exitCode)
             options->symmetryTolerance = number();
         } else if (arg == "--uv-mode") {
             const std::string mode = value();
-            if (mode == "corner" || mode == "vertex" || mode == "hybrid") {
+            if (mode == "corner" || mode == "vertex" || mode == "hybrid" || mode == "seam") {
                 options->uvMode = mode;
             } else {
                 fprintf(stderr, "unknown uv mode '%s' (corner|vertex|hybrid)\n", mode.c_str());
@@ -986,6 +988,19 @@ int main(int argc, char** argv)
     remesher.setProjectedHoleCaps(options.projectedCaps);
     remesher.setLocalRemesh(options.localRemesh);
     remesher.setExportUvs(options.writeUvs);
+    const bool seamSplit = options.uvMode == "seam" && options.symmetryAxis == 0;
+    remesher.setUvSeamSplitting(seamSplit);
+    if (options.uvMode == "seam" && options.symmetryAxis > 0) {
+        if (options.json) {
+            std::ostringstream line;
+            line << "{\"type\":\"warning\",\"code\":\"uv_seam_split_disabled\",\"value\":0"
+                 << ",\"message\":\"seam splitting is disabled when --symmetry is on; the UVs\""
+                 << "\" stay per-vertex to keep the mirrored mesh watertight\"}";
+            emitLine(line.str());
+        }
+        if (!options.quiet)
+            fprintf(stderr, "warning: seam splitting is disabled with --symmetry; UVs stay per-vertex\n");
+    }
     remesher.setSymmetryAxis(options.symmetryAxis);
     remesher.setSymmetryPlane(options.symmetryPlane);
     remesher.setSymmetryTolerance(options.symmetryTolerance);
@@ -1053,13 +1068,18 @@ int main(int argc, char** argv)
 
     std::string uvMode = "none";
     size_t uvCorners = 0;
+    const std::string writerMode = options.uvMode == "seam" ? "vertex" : options.uvMode;
     if (!writeObj(options.output, remesher.remeshedVertices(), remesher.remeshedQuads(),
-            vertexUvs, faceUvs, normals, options.uvMode, &uvMode, &uvCorners, &error)) {
+            vertexUvs, faceUvs, normals, writerMode, &uvMode, &uvCorners, &error)) {
         if (options.json)
             emitLine(errorEvent(error));
         fprintf(stderr, "error: %s\n", error.c_str());
         return 3;
     }
+    // "seam" writes the same per-vertex channel as "vertex"; keep the requested
+    // name in the report so a caller can tell how the UVs were produced.
+    if (options.uvMode == "seam" && uvMode == "vertex")
+        uvMode = "seam";
 
     if (options.verbose) {
         if (options.json) {

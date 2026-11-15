@@ -83,7 +83,7 @@ autoremesher --input armadillo.obj --output armadillo_quads.obj --target-quads 5
   -i, --input PATH            input OBJ (polygons are triangulated)
   -o, --output PATH           output OBJ of quads with vt and vn (default:
                               <input>_remeshed.obj)
-      --uv-mode M             corner | vertex | hybrid (default corner)
+      --uv-mode M             corner | vertex | hybrid | seam (default corner)
       --no-uv                 do not write vt lines
       --no-normals            do not write vn lines
       --symmetry AXIS         x | y | z: cut the output at that plane and mirror the
@@ -124,11 +124,15 @@ corner from the cover chart under that face - correct where the cover has charts
 seam sits between every pair of faces; `vertex` writes the extractor's own per-vertex
 UVs, continuous across any two faces that share a vertex, but a face whose corners come
 from different charts stretches across the seam; `hybrid` writes vertex UVs and falls
-back to per-corner UVs only for the faces where the two channels disagree on area.
+back to per-corner UVs only for the faces where the two channels disagree on area;
+`seam` cuts the mesh along its UV chart boundaries (one vertex cannot carry two UVs) and
+writes one UV per vertex, so faces inside a chart stay connected and the seam appears
+exactly where the cover has one - on the 12k sphere that costs 22 extra vertices.
 Measured on the 12k sphere: corner p99/p50 UV-area ratio 3.7 with 0 degenerate faces,
-vertex 62 with 9, hybrid 3.4 with 2. On a pathological 17,958-shell input the vertex
-channel is worse than corner (2,577 degenerate faces vs 38), which is why corner stays
-the default. The UVs are the island's own parameterization, mapped onto each quad
+vertex 62 with 9, hybrid 3.4 with 2, seam 1.41 with 0. On a pathological 17,958-shell
+input the vertex channel is worse than corner (2,577 degenerate faces vs 38) and seam is
+in between, which is why corner stays the default. `--symmetry` disables seam splitting
+(the cut would be re-welded into open edges) and says so in a warning. The UVs are the island's own parameterization, mapped onto each quad
 through the chart under its centroid, so a cover seam falls between faces rather than
 through them; islands are laid out side by side in UV space and the whole set is
 normalized into the unit square. A face whose chart is degenerate falls back to its own

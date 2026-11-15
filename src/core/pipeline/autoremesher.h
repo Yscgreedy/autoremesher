@@ -192,6 +192,15 @@ public:
         m_exportUvs = enabled;
     }
 
+    // Cut the mesh along the seams of its UV charts, so the per-vertex UVs can
+    // describe them: one vertex cannot carry two UVs, and a chart boundary is
+    // exactly where the cover changes chart.  Faces inside a chart still share
+    // vertices; only the seam duplicates them.
+    void setUvSeamSplitting(bool enabled)
+    {
+        m_uvSeamSplitting = enabled;
+    }
+
     const std::vector<std::vector<size_t>>& remeshedQuads()
     {
         return m_remeshedQuads;
@@ -419,6 +428,7 @@ private:
     double m_smoothNormalDegrees = 0.0;
     bool m_exactTargetQuads = false;
     bool m_exportUvs = true;
+    bool m_uvSeamSplitting = false;
     int m_symmetryAxis = 0;
     double m_symmetryPlane = 0.0;
     double m_symmetryTolerance = 0.002;

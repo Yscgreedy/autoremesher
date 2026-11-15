@@ -36,6 +36,14 @@ Unreleased
   where the two channels disagree on area). Measured: sphere 12k corner 0 degenerate
   UV faces / p99 3.7, vertex 9 / 62, hybrid 2 / 3.4; multi_part corner 38 degenerate,
   vertex 2577 - which is why corner stays the default
+- UV seam splitting (`--uv-mode seam`): src/core/param/uvcharts.* unions faces into
+  charts by comparing the per-face chart UVs on their shared edges (1% of the UV
+  extent: inside a chart the independent evaluations agree to ~0.1%, across a seam the
+  values are a whole cell apart) and duplicates the vertices on chart boundaries. One
+  vertex cannot carry two UVs, so this is what lets per-vertex UVs describe a seam.
+  Sphere 12k: 22 duplicated vertices, 0 degenerate UV faces, p99/p50 1.41 (corner 3.7);
+  multi_part: 97 degenerate (corner 38).  Symmetry turns it off with a warning because
+  the cut row would be re-welded into open edges.  Default stays corner
 - Export UVs and normals: the output OBJ now carries `vt` (one per face corner) and
   `vn` (smooth, area weighted). The UVs are the island's own parameterization carried
   onto the quads through the chart under each face's centroid (`UvTransfer`, uniform

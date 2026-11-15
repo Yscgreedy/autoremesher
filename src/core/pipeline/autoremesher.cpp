@@ -24,6 +24,7 @@
 #include <AutoRemesher/MeshSeparator>
 #include <AutoRemesher/Parameterizer>
 #include <AutoRemesher/QuadExtractor>
+#include <AutoRemesher/UvCharts>
 #include <AutoRemesher/UvTransfer>
 #include <core/base/logging.h>
 #include <algorithm>
@@ -1114,6 +1115,32 @@ bool AutoRemesher::remesh()
             }
         }
 
+        // Chart-driven seam splitting: one vertex cannot carry two UVs, so the
+        // mesh is cut where the cover changes chart.  Faces inside a chart keep
+        // sharing vertices; only the seam duplicates them.
+        std::vector<Vector3> splitVertices;
+        std::vector<std::vector<size_t>> splitFaces;
+        const std::vector<Vector3>* meshVertices = &vertices;
+        const std::vector<std::vector<size_t>>* meshFaces = &quads;
+        bool splitDone = false;
+        // The symmetry pass cuts and re-welds the mesh; splitting first would leave
+        // the cut row with duplicated vertices that the weld then collapses into
+        // open edges.  Symmetry wins, the UVs stay per-vertex.
+        if (m_exportUvs && m_uvSeamSplitting && m_symmetryAxis == 0 && islandUvsOk
+            && islandFaceUvs.size() == quads.size() && !quads.empty()) {
+            ChartSplit split = splitAtChartSeams(vertices, quads, islandFaceUvs);
+            if (split.faces.size() == quads.size()
+                && split.vertexUvs.size() == split.vertices.size() && !split.vertices.empty()) {
+                splitVertices = std::move(split.vertices);
+                splitFaces = std::move(split.faces);
+                islandVertexUvs = std::move(split.vertexUvs);
+                vertexUvsComplete = true;
+                meshVertices = &splitVertices;
+                meshFaces = &splitFaces;
+                splitDone = true;
+            }
+        }
+
         // One stripe per island in UV space: their cover solves are independent.
         double minU = 0.0;
         double maxU = 0.0;
@@ -1159,18 +1186,18 @@ bool AutoRemesher::remesh()
         }
 
         size_t vertexStartIndex = m_remeshedVertices.size();
-        m_remeshedVertices.reserve(m_remeshedVertices.size() + vertices.size());
-        for (const auto& it : vertices) {
+        m_remeshedVertices.reserve(m_remeshedVertices.size() + meshVertices->size());
+        for (const auto& it : *meshVertices) {
             m_remeshedVertices.push_back(it);
         }
-        for (const auto& it : quads) {
+        for (const auto& it : *meshFaces) {
             std::vector<size_t> quad;
             quad.reserve(it.size());
             for (const auto& v : it)
                 quad.push_back(vertexStartIndex + v);
             m_remeshedQuads.push_back(quad);
         }
-        if (vertexUvsComplete && islandVertexUvs.size() == vertices.size()) {
+        if (vertexUvsComplete && islandVertexUvs.size() == meshVertices->size()) {
             m_remeshedVertexUvs.insert(m_remeshedVertexUvs.end(),
                 islandVertexUvs.begin(), islandVertexUvs.end());
         }

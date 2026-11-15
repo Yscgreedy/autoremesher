@@ -21,6 +21,7 @@
  */
 #ifndef AUTO_REMESHER_AUTO_REMESHER_H
 #define AUTO_REMESHER_AUTO_REMESHER_H
+#include <AutoRemesher/MeshSymmetry>
 #include <AutoRemesher/Progress>
 #include <AutoRemesher/TopologyStats>
 #include <AutoRemesher/Vector3>
@@ -319,10 +320,9 @@ public:
         return m_lastError;
     }
 
-    // Mirror symmetry across a coordinate plane: 0 = off, 1 = x = 0, 2 = y = 0,
-    // 3 = z = 0.  The output is made exactly symmetric where both sides agree on
-    // a counterpart; vertices without one are counted, which is the honest
-    // measure of how much the topology itself is asymmetric.
+    // Mirror symmetry across a plane: 0 = off, 1 = x, 2 = y, 3 = z.  The output is
+    // cut at the plane and mirrored, so it is symmetric by construction; see
+    // AutoRemesher/MeshSymmetry for what the pass does.
     void setSymmetryAxis(int axis)
     {
         m_symmetryAxis = axis;
@@ -340,17 +340,6 @@ public:
     {
         m_symmetryPlane = offset;
     }
-
-    struct SymmetryStats {
-        int axis = 0;
-        size_t seamVertices = 0;
-        size_t clippedFaces = 0;   // faces the plane cut in two
-        size_t mirroredFaces = 0;  // faces added by the mirror
-        size_t verticesBefore = 0;
-        size_t verticesAfter = 0;
-        double plane = 0.0;        // coordinate of the mirror plane along the axis
-        double tolerance = 0.0;    // how close to the plane counts as "on the seam"
-    };
 
     const SymmetryStats& symmetryStats() const
     {
@@ -424,10 +413,6 @@ private:
     double m_symmetryPlane = 0.0;
     double m_symmetryTolerance = 0.002;
     SymmetryStats m_symmetryStats;
-
-    // Pulls near-mirror vertex pairs onto each other's mirror image and snaps the
-    // seam to the plane; called once after the islands are merged.
-    void symmetrizeOutput();
     bool m_relativePositionTolerance = true;
     double m_islandAreaFraction = 0.0;
     bool m_weldPatches = false;

@@ -36,9 +36,10 @@ Unreleased
   the unit square; a degenerate chart falls back to the face's planar frame.
   `--no-uv` / `--no-normals` skip either. Measured on the sphere fixture: 0 degenerate
   UV faces, UV-area p99/p50 = 3.7
-- Move the topology analyzer to `src/core/geom/topologystats.cpp` and the UV transfer to
-  `src/core/param/uvtransfer.cpp`; the pipeline file no longer sits on its 1500 line
-  budget
+- Move the topology analyzer to `src/core/geom/topologystats.cpp`, the UV transfer to
+  `src/core/param/uvtransfer.cpp` and the symmetry pass to
+  `src/core/pipeline/meshsymmetry.cpp`; the pipeline file is back to 1251 lines and its
+  R8 exemption is gone
 - Symmetry: `--symmetry x|y|z` cuts the output at the plane, welds the seam and
   mirrors the positive half, so the result is symmetric by construction.  Face
   clipping carries the face's own UVs; the cut row loses a corner (98.6% quads on

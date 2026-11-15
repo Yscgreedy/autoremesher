@@ -15,4 +15,5 @@ set(AUTOREMESHER_CORE_MODULE_SOURCES
     "src/core/extract/quadextractor.cpp"
     "src/core/pipeline/autoremesher.cpp"
     "src/core/pipeline/isotropicremesher.cpp"
+    "src/core/pipeline/meshsymmetry.cpp"
 )

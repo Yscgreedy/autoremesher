@@ -422,6 +422,223 @@ def compute_metrics(mesh, quiet=False):
         out["valence4_ratio"] = (float(n_v4) / n_used) if n_used else 0.0
         out["irregular_vertices"] = int(n_used - n_v4)
 
+        # ---- pole（价数异常顶点）分布 ------------------------------------
+        # A quad mesh expects valence 4 on the interior; a tri mesh expects 6.
+        # Boundary vertices are excluded: their valence is lower by design, and
+        # counting them would make every open model look full of poles.
+        expected_valence = 4 if quads >= (F - quads) else 6
+        boundary_vertex = np.zeros(nv, dtype=bool)
+        bmv = ucount == 1
+        if bmv.any():
+            boundary_vertex[u[bmv]] = True
+            boundary_vertex[w[bmv]] = True
+        interior = used & ~boundary_vertex
+        interior_count = int(interior.sum())
+        pole_mask = interior & (val != expected_valence)
+        pole_idx = np.nonzero(pole_mask)[0]
+        near_boundary = np.zeros(nv, dtype=bool)
+        touch = boundary_vertex[u] | boundary_vertex[w]
+        if touch.any():
+            near_boundary[u[touch]] = True
+            near_boundary[w[touch]] = True
+
+        out["pole_expected_valence"] = int(expected_valence)
+        out["interior_vertices"] = interior_count
+        out["pole_count"] = int(pole_idx.size)
+        out["pole_ratio"] = (float(pole_idx.size) / interior_count) if interior_count else 0.0
+        out["pole_per_1000_faces"] = (1000.0 * pole_idx.size / F) if F else 0.0
+        out["poles_touching_boundary"] = int((pole_mask & near_boundary).sum())
+
+        # Nearest other pole and clustering, in units of the median edge length so
+        # the numbers mean the same thing on a 26 cm shoe and a 2 m character.
+        unit = out.get("edge_length", {}).get("median") or 0.0
+        if not unit:
+            unit = (diag / 100.0) if diag > 0 else 1.0
+        radius = 2.0 * unit
+        sample_limit = 2000
+        if pole_idx.size > sample_limit:
+            pick = np.linspace(0, pole_idx.size - 1, sample_limit).astype(np.int64)
+            sample = pole_idx[pick]
+            sampled = True
+        else:
+            sample = pole_idx
+            sampled = False
+        nearest = np.zeros(0)
+        cluster_pairs = []
+        if sample.size:
+            pos = V[sample]
+            nearest = np.full(sample.size, np.inf)
+            step = 256
+            for start in range(0, sample.size, step):
+                block = pos[start:start + step]
+                d = np.linalg.norm(block[:, None, :] - pos[None, :, :], axis=2)
+                rows = np.arange(d.shape[0])
+                d[rows, start + rows] = np.inf
+                nearest[start:start + d.shape[0]] = d.min(axis=1)
+                hit = np.nonzero(d <= radius)
+                if hit[0].size:
+                    gi = start + hit[0]
+                    gj = hit[1]
+                    keep = gi < gj
+                    if keep.any():
+                        cluster_pairs.append(np.stack([sample[gi[keep]], sample[gj[keep]]], axis=1))
+        if nearest.size and np.isfinite(nearest).any():
+            finite = nearest[np.isfinite(nearest)]
+            out["pole_nearest_p50_edges"] = float(np.median(finite) / unit)
+            out["pole_nearest_p95_edges"] = float(np.percentile(finite, 95) / unit)
+        else:
+            out["pole_nearest_p50_edges"] = None
+            out["pole_nearest_p95_edges"] = None
+        if cluster_pairs:
+            pairs = np.concatenate(cluster_pairs, axis=0)
+            pol = union_labels(nv, pairs)
+            labels, counts = np.unique(pol[pole_idx], return_counts=True)
+            out["pole_clusters"] = int(labels.size)
+            out["pole_cluster_max"] = int(counts.max()) if counts.size else 0
+            out["pole_isolated_ratio"] = float((counts == 1).sum()) / float(labels.size)
+        else:
+            out["pole_clusters"] = int(pole_idx.size)
+            out["pole_cluster_max"] = 1 if pole_idx.size else 0
+            out["pole_isolated_ratio"] = 1.0 if pole_idx.size else 0.0
+        out["poles_sampled"] = bool(sampled)
+
+        # ---- edge loop 走态 ---------------------------------------------
+        # An edge loop continues *straight through* a valence-4 vertex: coming in
+        # along edge (u, v) it leaves along the neighbour of v that shares no quad
+        # with u.  Anything else - a boundary, a pole - ends the chain, which is
+        # exactly what a modeller means by "the loop runs out here".  The turn per
+        # step is the angle between consecutive edges; a loop that follows the
+        # surface has a small one, a loop cutting across curvature does not.
+        quad_faces = np.nonzero(sizes == 4)[0]
+        quad_of_edge = {}
+        incident = {}
+        adjacent_at = {}
+        if quad_faces.size:
+            starts = mesh.face_starts[quad_faces]
+            corners = mesh.face_idx[starts[:, None] + np.arange(4, dtype=np.int64)[None, :]].tolist()
+            for row, fi in zip(corners, quad_faces.tolist()):
+                for i in range(4):
+                    x = row[i]
+                    y = row[(i + 1) % 4]
+                    key = (x, y) if x < y else (y, x)
+                    quad_of_edge.setdefault(key, []).append(int(fi))
+                    incident.setdefault(x, set()).add(y)
+                    incident.setdefault(y, set()).add(x)
+                    # the two edges of this quad at corner i are adjacent at x
+                    adjacent_at.setdefault(x, set()).add(frozenset((row[(i - 1) % 4], row[(i + 1) % 4])))
+
+        def loop_partner(v, u):
+            neighbours = incident.get(v)
+            if neighbours is None or len(neighbours) != expected_valence:
+                return None
+            if boundary_vertex[v]:
+                return None
+            blocked = adjacent_at.get(v, ())
+            for w in neighbours:
+                if w == u:
+                    continue
+                if frozenset((u, w)) not in blocked:
+                    return w
+            return None
+
+        loop_lengths = []
+        turns = []
+        closed_loops = 0
+        open_loops = 0
+        visited = set()
+        for start in quad_of_edge:
+            if start in visited:
+                continue
+            # A chain only starts between two interior vertices: an edge that
+            # touches the boundary is not part of a loop, it is where one ends.
+            if boundary_vertex[start[0]] or boundary_vertex[start[1]]:
+                # Not marked visited: a chain that reaches the boundary has to be
+                # allowed to include the edge it ends on.
+                continue
+            visited.add(start)
+            loop_from, loop_to = start
+            chain = [loop_from, loop_to]
+            closed = False
+            previous, current = loop_from, loop_to
+            while True:
+                following = loop_partner(current, previous)
+                if following is None:
+                    break
+                edge = (current, following) if current < following else (following, current)
+                if edge == start:
+                    closed = True
+                    break
+                if edge in visited:
+                    break
+                visited.add(edge)
+                chain.append(following)
+                previous, current = current, following
+            if not closed:
+                previous, current = loop_to, loop_from
+                while True:
+                    following = loop_partner(current, previous)
+                    if following is None:
+                        break
+                    edge = (current, following) if current < following else (following, current)
+                    if edge == start:
+                        closed = True
+                        break
+                    if edge in visited:
+                        break
+                    visited.add(edge)
+                    chain.insert(0, following)
+                    previous, current = current, following
+            if len(chain) - 1 < 2:
+                # A single edge is not a chain: at a valence-3 vertex every edge
+                # would otherwise show up as a one-edge "loop".
+                continue
+            loop_lengths.append(len(chain) - 1)
+            if closed:
+                closed_loops += 1
+            else:
+                open_loops += 1
+            for i in range(1, len(chain) - 1):
+                incoming = V[chain[i]] - V[chain[i - 1]]
+                outgoing = V[chain[i + 1]] - V[chain[i]]
+                lengths_in = float(np.linalg.norm(incoming))
+                lengths_out = float(np.linalg.norm(outgoing))
+                if lengths_in <= 0 or lengths_out <= 0:
+                    continue
+                dot = float(np.clip(np.dot(incoming / lengths_in, outgoing / lengths_out), -1.0, 1.0))
+                turns.append(float(np.degrees(np.arccos(dot))))
+        out["edge_loops"] = int(closed_loops)
+        out["edge_loop_open_bands"] = int(open_loops)
+        out["edge_loop_closed_ratio"] = (float(closed_loops) / float(closed_loops + open_loops)
+                                         if (closed_loops + open_loops) else 0.0)
+        lengths_undirected = [length for length in loop_lengths]
+        if lengths_undirected:
+            out["edge_loop_length_p50"] = float(np.median(lengths_undirected))
+            out["edge_loop_length_max"] = int(max(lengths_undirected))
+        else:
+            out["edge_loop_length_p50"] = 0.0
+            out["edge_loop_length_max"] = 0
+        if turns:
+            out["edge_loop_turn_mean_deg"] = float(np.mean(turns))
+            out["edge_loop_turn_p95_deg"] = float(np.percentile(turns, 95))
+            out["edge_loop_turn_max_deg"] = float(max(turns))
+        else:
+            out["edge_loop_turn_mean_deg"] = None
+            out["edge_loop_turn_p95_deg"] = None
+            out["edge_loop_turn_max_deg"] = None
+
+        dihedral = []
+        for key, owners in quad_of_edge.items():
+            if len(owners) != 2:
+                continue
+            n1 = face_norm[owners[0]]
+            n2 = face_norm[owners[1]]
+            if np.linalg.norm(n1) <= 0 or np.linalg.norm(n2) <= 0:
+                continue
+            dot = float(np.clip(np.dot(n1, n2), -1.0, 1.0))
+            dihedral.append(float(np.degrees(np.arccos(dot))))
+        out["edge_loop_dihedral_p95_deg"] = float(np.percentile(dihedral, 95)) if dihedral else None
+
+
         # ---- 法向一致性：相邻面法向夹角 > 90 度 ---------------------------
         bad_pairs = 0
         max_ang = 0.0
@@ -508,6 +725,15 @@ def compute_metrics(mesh, quiet=False):
             "valence_mean": None, "valence_max": None,
             "valence4_ratio": 0.0, "irregular_vertices": 0,
             "max_dihedral_deg": 0.0, "normal_inconsistent_ratio": 0.0,
+            "pole_expected_valence": 4, "interior_vertices": 0, "pole_count": 0,
+            "pole_ratio": 0.0, "pole_per_1000_faces": 0.0,
+            "poles_touching_boundary": 0, "pole_nearest_p50_edges": None,
+            "pole_nearest_p95_edges": None, "pole_clusters": 0,
+            "pole_cluster_max": 0, "pole_isolated_ratio": 0.0, "poles_sampled": False,
+            "edge_loops": 0, "edge_loop_open_bands": 0, "edge_loop_closed_ratio": 0.0,
+            "edge_loop_length_p50": 0.0, "edge_loop_length_max": 0,
+            "edge_loop_turn_mean_deg": None, "edge_loop_turn_p95_deg": None,
+            "edge_loop_turn_max_deg": None, "edge_loop_dihedral_p95_deg": None,
         })
 
     # ---- 退化面 ----------------------------------------------------------
@@ -869,6 +1095,37 @@ def report_text(m, refres=None):
     else:
         p("  (none)")
     p("")
+    p("Poles (valence != %s on the interior)" % m.get("pole_expected_valence", 4))
+    p("  poles .................... %d  (%.2f%% of %d interior vertices, %.1f per 1000 faces)"
+      % (m.get("pole_count", 0), 100.0 * (m.get("pole_ratio") or 0),
+         m.get("interior_vertices", 0), m.get("pole_per_1000_faces") or 0.0))
+    p("  touching the boundary .... %d" % m.get("poles_touching_boundary", 0))
+    p("  clusters (<= 2 edges) .... %d  (largest %d, isolated %.1f%%)"
+      % (m.get("pole_clusters", 0), m.get("pole_cluster_max", 0),
+         100.0 * (m.get("pole_isolated_ratio") or 0)))
+    n50 = m.get("pole_nearest_p50_edges")
+    n95 = m.get("pole_nearest_p95_edges")
+    if n50 is None:
+        p("  nearest pole distance .... (none)")
+    else:
+        p("  nearest pole distance .... p50 %.2f  p95 %.2f  (edge lengths)"
+          % (n50, n95 if n95 is not None else 0.0))
+    p("")
+    p("Edge loops (quad bands)")
+    p("  closed loops ............. %d  (open bands %d, closed ratio %.1f%%)"
+      % (m.get("edge_loops", 0), m.get("edge_loop_open_bands", 0),
+         100.0 * (m.get("edge_loop_closed_ratio") or 0)))
+    p("  loop length .............. p50 %s  max %s  (edges)"
+      % (m.get("edge_loop_length_p50"), m.get("edge_loop_length_max")))
+    tm = m.get("edge_loop_turn_mean_deg")
+    if tm is None:
+        p("  turn per step ............ (no loops)")
+    else:
+        p("  turn per step ............ mean %.2f deg  p95 %.2f deg  max %.2f deg"
+          % (tm, m.get("edge_loop_turn_p95_deg") or 0.0, m.get("edge_loop_turn_max_deg") or 0.0))
+    p("  dihedral across band ..... p95 %s deg"
+      % _fmt(m.get("edge_loop_dihedral_p95_deg"), 2))
+    p("")
     p("Geometry")
     bb = m["bbox"]
     p("  bbox min ................. [%s]" % ", ".join(_fmt(x) for x in bb["min"]))
@@ -946,6 +1203,17 @@ _COMPARE_ROWS = [
     ("normal_inconsistent_edges", "normal-inconsistent edges", 0, False),
     ("irregular_vertices", "irregular vertices", 0, False),
     ("valence4_ratio", "valence-4 ratio", 4, True),
+    ("pole_count", "poles (interior)", 0, False),
+    ("pole_ratio", "pole ratio (interior)", 4, False),
+    ("pole_clusters", "pole clusters", 0, False),
+    ("pole_cluster_max", "largest pole cluster", 0, False),
+    ("pole_isolated_ratio", "isolated pole ratio", 4, True),
+    ("pole_nearest_p50_edges", "nearest pole p50 (edges)", 3, True),
+    ("edge_loops", "closed edge loops", 0, None),
+    ("edge_loop_closed_ratio", "closed loop ratio", 4, True),
+    ("edge_loop_turn_mean_deg", "loop turn mean (deg)", 2, False),
+    ("edge_loop_turn_p95_deg", "loop turn p95 (deg)", 2, False),
+    ("edge_loop_dihedral_p95_deg", "loop dihedral p95 (deg)", 2, False),
     ("area_total", "surface area", 6, None),
     ("edge_length.median", "edge len median", 6, None),
     ("edge_length.p95", "edge len p95", 6, None),

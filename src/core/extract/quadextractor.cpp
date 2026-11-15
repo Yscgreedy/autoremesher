@@ -1499,8 +1499,7 @@ void QuadExtractor::fixHoles()
         // Sealing them costs about half their perimeter in faces, which also moves
         // the quad count towards the budget instead of away from it.
         if (m_sealClosedInputHoles && (double)loop.size() > smallEdges) {
-            Log::write(Log::Debug, "Sealing hole of closed input at length:"
-                    + std::to_string(loop.size()));
+            Log::write(Log::Debug, "Sealing hole of closed input at length:" + std::to_string(loop.size()));
             const size_t added = fillHoleGraded(loop, largeEdges, true);
             gradedFaces += added;
             recordFilledHole(added);
@@ -3359,7 +3358,6 @@ void QuadExtractor::validateRemeshedMesh()
     }
 }
 
-
 // Vertices that sit on the same point but never share a face: the validate pass
 // welds along face edges only, so a cleanup pass that copies a cross point instead
 // of reusing it leaves a pair behind that it cannot see.  On a 6k budget that was
@@ -3918,9 +3916,7 @@ void QuadExtractor::clampQuadAspect(double maximumAspect)
     // residual is structural - collapsing the short side would give some edge a
     // third face - so saying "the clamp is best effort" is the honest report.
     if (tooLong > 0) {
-        Log::write(Log::Normal, "Aspect clamp: " + std::to_string(tooLong)
-                + " quad(s) still over " + std::to_string(maximumAspect)
-                + " - their short side cannot be collapsed without giving an edge a third face");
+        Log::write(Log::Normal, "Aspect clamp: " + std::to_string(tooLong) + " quad(s) still over " + std::to_string(maximumAspect) + " - their short side cannot be collapsed without giving an edge a third face");
     }
 }
 

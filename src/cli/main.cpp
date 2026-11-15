@@ -13,16 +13,6 @@
 #include <AutoRemesher/Vector3>
 #include <core/base/logging.h>
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1174,24 +1164,18 @@ std::vector<AutoRemesher::Vector3> computeVertexNormals(
 
 // Renaming onto an existing file is part of the contract: a pipeline that reruns
 // into the same path has to get the new mesh, not "failed to move".  std::rename
-// replaces on POSIX but fails on Windows the moment the target exists, which made
-// the second run of any fixed-name SOP fail with exit 3.  Windows therefore goes
-// through MoveFileEx with MOVEFILE_REPLACE_EXISTING; the write-then-replace order
-// still means a cancelled run never leaves a half-written OBJ behind.
+// replaces the target on POSIX but fails on Windows the moment it exists, which
+// made the second run of any fixed-name SOP fail with exit 3.  Trying the rename
+// first and removing the destination as a fallback keeps the POSIX path atomic
+// and gives Windows the replace it needs, using only <cstdio> - the layering gate
+// forbids platform headers here (tools/check_boundaries.py, rule R3).
 bool replaceFile(const std::string& from, const std::string& to)
 {
-#if defined(_WIN32)
-    if (0 != ::MoveFileExA(from.c_str(), to.c_str(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    if (0 == std::rename(from.c_str(), to.c_str()))
         return true;
-    // A read-only attribute on the old result is the one common reason the replace
-    // is refused; dropping the file and retrying keeps the caller's path usable.
-    if (0 == std::remove(to.c_str()))
-        return 0 == std::rename(from.c_str(), to.c_str());
-    return false;
-#else
+    if (0 != std::remove(to.c_str()))
+        return false;
     return 0 == std::rename(from.c_str(), to.c_str());
-#endif
 }
 
 bool writeObj(const std::string& path,

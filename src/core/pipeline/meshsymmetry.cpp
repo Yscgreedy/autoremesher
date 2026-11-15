@@ -23,16 +23,17 @@
 #include <algorithm>
 #include <cmath>
 #include <core/base/logging.h>
+#include <cstdint>
 #include <map>
 #include <unordered_map>
 
 namespace AutoRemesher {
 
-SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
+SymmetryResult mirrorHalf(const std::vector<Vector3>& sourceVertices,
     const std::vector<std::vector<size_t>>& sourceFaces,
     const std::vector<std::vector<Vector2>>& sourceFaceUvs,
     const std::vector<Vector2>& vertexUvs,
-    int axisValue, double plane, double tolerance)
+    int axisValue, double plane, double tolerance, bool keepPositive)
 {
     SymmetryResult result;
     SymmetryStats& stats = result.stats;
@@ -42,8 +43,22 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
     stats.plane = plane;
     stats.verticesBefore = sourceVertices.size();
     const size_t axis = (size_t)(axisValue - 1);
-    // The quad mesh is cut at the plane and the positive half is mirrored onto the
-    // negative one, so the result is symmetric by construction instead of by
+    // Which half survives is a sign, not a second copy of this function: the cut
+    // below measures the distance to the plane and multiplies it by side, so the
+    // kept side always reads as ">= 0" and both halves run the same arithmetic.
+    // Multiplication by exactly +1.0 / -1.0 is exact in IEEE 754, so
+    // keepPositive == true reproduces the previous implementation bit for bit
+    // (that path sits behind a sha regression gate).
+    const double side = keepPositive ? 1.0 : -1.0;
+    // "Strictly on the kept side", as the two exact comparisons of the original
+    // code rather than as side * distance: the difference form would turn an
+    // infinite coordinate into NaN and answer differently than before, and this
+    // half of the pass is behind a byte-for-byte regression gate.
+    const auto isStrictlyOnKeptSide = [&](double coordinate) {
+        return keepPositive ? coordinate > plane : coordinate < plane;
+    };
+    // The quad mesh is cut at the plane and the kept half is mirrored onto the
+    // other one, so the result is symmetric by construction instead of by
     // hope: pairing vertices after the fact only works when the topology already
     // happens to mirror.  The cut row is the price: a few faces lose a corner.
     Vector3 minimum = sourceVertices[0];
@@ -93,7 +108,7 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
         bool anyPositive = false;
         bool anyNegative = false;
         for (const size_t corner : face) {
-            const double coordinate = sourceVertices[corner][axis] - plane;
+            const double coordinate = (sourceVertices[corner][axis] - plane) * side;
             if (coordinate > 0.0)
                 anyPositive = true;
             else if (coordinate < 0.0)
@@ -130,8 +145,8 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
         const size_t count = face.size();
         for (size_t i = 0; i < count; ++i) {
             const size_t j = (i + 1) % count;
-            const double di = sourceVertices[face[i]][axis] - plane;
-            const double dj = sourceVertices[face[j]][axis] - plane;
+            const double di = (sourceVertices[face[i]][axis] - plane) * side;
+            const double dj = (sourceVertices[face[j]][axis] - plane) * side;
             if (di >= 0.0) {
                 clipped.push_back(sourceVertices[face[i]]);
                 clippedSource.push_back(face[i]);
@@ -317,7 +332,7 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
         const std::vector<size_t> face = faces[faceIndex];
         bool hasPositive = false;
         for (const size_t corner : face) {
-            if (vertices[corner][axis] > plane) {
+            if (isStrictlyOnKeptSide(vertices[corner][axis])) {
                 hasPositive = true;
                 break;
             }
@@ -353,6 +368,296 @@ SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
     }
     stats.verticesAfter = result.vertices.size();
     return result;
+}
+
+SymmetryResult mirrorSymmetrize(const std::vector<Vector3>& sourceVertices,
+    const std::vector<std::vector<size_t>>& sourceFaces,
+    const std::vector<std::vector<Vector2>>& sourceFaceUvs,
+    const std::vector<Vector2>& vertexUvs,
+    int axisValue, double plane, double tolerance)
+{
+    return mirrorHalf(sourceVertices, sourceFaces, sourceFaceUvs, vertexUvs,
+        axisValue, plane, tolerance, /*keepPositive=*/true);
+}
+
+namespace {
+
+    // Cell keys are exact integers, so any well mixing hash is correct; this
+    // splitmix64 finaliser is what keeps the table from degenerating on structured
+    // input.  A vertex grid hashes into lattices, and a plain xor or sum of the three
+    // coordinates sends whole sheets of cells into the same bucket.
+    inline uint64_t mixGridHash(uint64_t value)
+    {
+        value += 0x9e3779b97f4a7c15ull;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+        return value ^ (value >> 31);
+    }
+
+    struct GridCell {
+        long long x = 0;
+        long long y = 0;
+        long long z = 0;
+
+        bool operator==(const GridCell& other) const
+        {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+
+    struct GridCellHash {
+        size_t operator()(const GridCell& cell) const
+        {
+            const uint64_t merged = mixGridHash((uint64_t)cell.x)
+                ^ mixGridHash((uint64_t)cell.y + 0x9e3779b97f4a7c15ull);
+            return (size_t)mixGridHash(merged ^ mixGridHash((uint64_t)cell.z + 0xc2b2ae3d27d4eb4full));
+        }
+    };
+
+    inline bool isFinitePoint(const Vector3& point)
+    {
+        return std::isfinite(point[0]) && std::isfinite(point[1]) && std::isfinite(point[2]);
+    }
+
+    // Integer cell coordinate.  Anything outside the representable range, NaN
+    // included, is clamped instead of cast: converting such a double to long long is
+    // undefined behaviour, and a broken vertex must not be able to corrupt the key
+    // space on its way to being ignored.
+    inline long long gridCoordinate(double value, double origin, double cellSize)
+    {
+        const double scaled = (value - origin) / cellSize;
+        const double range = 4.0e18;
+        if (!(scaled > -range))
+            return -4000000000000000000LL;
+        if (!(scaled < range))
+            return 4000000000000000000LL;
+        return (long long)std::floor(scaled);
+    }
+
+}
+
+SymmetryCheck evaluateSymmetry(const std::vector<Vector3>& vertices,
+    const std::vector<std::vector<size_t>>& faces,
+    int axis, double plane, bool estimatePlane, double tolerance)
+{
+    SymmetryCheck check;
+    if (axis < 1 || axis > 3 || vertices.empty())
+        return check;
+    check.axis = axis;
+    const size_t axisIndex = (size_t)(axis - 1);
+    // faces is deliberately unused: whether a vertex is matched depends on where
+    // it sits, and counting only the referenced vertices would quietly hide loose
+    // vertices from the ratio.  The parameter stays so all three entry points
+    // accept the same mesh without the caller slicing it first.
+    (void)faces;
+    // A negative or NaN tolerance cannot describe a neighbourhood; clamping it to
+    // zero keeps the test one-sided (only coincident points match) instead of
+    // silently matching everything through a comparison rewrite.
+    const double limit = (tolerance > 0.0) ? tolerance : 0.0;
+    check.consideredVertices = vertices.size();
+    check.plane = plane;
+
+    if (estimatePlane) {
+        // The median, not the mean: a shoe or a foot is heavier on one side, and
+        // its mean coordinate sits off the true mirror plane by however lopsided
+        // the mass distribution is.  The median ignores that tail.
+        std::vector<double> coordinates;
+        coordinates.reserve(vertices.size());
+        for (const auto& vertex : vertices) {
+            if (std::isfinite(vertex[axisIndex]))
+                coordinates.push_back(vertex[axisIndex]);
+        }
+        if (!coordinates.empty()) {
+            const size_t middle = coordinates.size() / 2;
+            std::nth_element(coordinates.begin(), coordinates.begin() + middle, coordinates.end());
+            double median = coordinates[middle];
+            if (0 == coordinates.size() % 2) {
+                // Even count: average the two middle values, or the estimate jumps
+                // by half a vertex spacing whenever a single vertex is added.
+                median = 0.5 * (median + *std::max_element(coordinates.begin(), coordinates.begin() + middle));
+            }
+            check.plane = median;
+            check.planeEstimated = true;
+        }
+        // Nothing finite to measure: keep the caller's plane and leave
+        // planeEstimated false, so the caller knows it did not come from the mesh.
+    }
+
+    Vector3 minimum;
+    Vector3 maximum;
+    bool haveBounds = false;
+    for (const auto& vertex : vertices) {
+        if (!isFinitePoint(vertex))
+            continue;
+        if (!haveBounds) {
+            minimum = vertex;
+            maximum = vertex;
+            haveBounds = true;
+            continue;
+        }
+        for (size_t i = 0; i < 3; ++i) {
+            minimum[i] = std::min(minimum[i], vertex[i]);
+            maximum[i] = std::max(maximum[i], vertex[i]);
+        }
+    }
+    if (!haveBounds)
+        return check;
+
+    const double diagonal = (maximum - minimum).length();
+    // The tolerance is the smallest distance that can still count as a match, so
+    // the grid never needs to be finer than that; finer would only cost memory.
+    // The other direction is the danger: a tolerance as large as the model puts
+    // every vertex into one cell, and every query would then walk the whole mesh.
+    // The diagonal cap turns that back into a bounded number of cells.
+    const double baseCell = std::max(limit, 1e-9);
+    const double capCell = diagonal > 0.0 ? diagonal / 64.0 : baseCell;
+    const double cellSize = std::max(std::min(baseCell, capCell), 1e-12);
+    // A point within the tolerance is at most ceil(limit / cellSize) cells away,
+    // so the ring walk normally stops after ring 1; eight rings is the hard bound
+    // that keeps one query at no more than 17^3 cell lookups.
+    int ringLimit = (int)std::min(8.0, std::ceil(limit / cellSize) + 1.0);
+    if (ringLimit < 1)
+        ringLimit = 1;
+
+    std::unordered_map<GridCell, std::vector<size_t>, GridCellHash> grid;
+    grid.reserve(vertices.size() + vertices.size() / 4);
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        const Vector3& vertex = vertices[i];
+        if (!isFinitePoint(vertex))
+            continue;
+        GridCell cell;
+        cell.x = gridCoordinate(vertex[0], minimum[0], cellSize);
+        cell.y = gridCoordinate(vertex[1], minimum[1], cellSize);
+        cell.z = gridCoordinate(vertex[2], minimum[2], cellSize);
+        grid[cell].push_back(i);
+    }
+
+    std::vector<const std::vector<size_t>*> buckets;
+    double deviationSum = 0.0;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        const Vector3& vertex = vertices[i];
+        if (!isFinitePoint(vertex))
+            continue;
+        double deviation = 0.0;
+        if (!(std::fabs(vertex[axisIndex] - plane) <= limit)) {
+            Vector3 mirrored = vertex;
+            mirrored[axisIndex] = 2.0 * plane - mirrored[axisIndex];
+            // Every vertex lives inside the bounding box, so a mirror point more
+            // than the tolerance away from it in any axis has no partner at all.
+            // On an asymmetric mesh this is the common case, and it costs six
+            // comparisons instead of a few thousand cell lookups.
+            if (mirrored[0] < minimum[0] - limit || mirrored[0] > maximum[0] + limit
+                || mirrored[1] < minimum[1] - limit || mirrored[1] > maximum[1] + limit
+                || mirrored[2] < minimum[2] - limit || mirrored[2] > maximum[2] + limit)
+                continue;
+            const long long baseX = gridCoordinate(mirrored[0], minimum[0], cellSize);
+            const long long baseY = gridCoordinate(mirrored[1], minimum[1], cellSize);
+            const long long baseZ = gridCoordinate(mirrored[2], minimum[2], cellSize);
+            // Only distances up to the tolerance can match, so the tolerance is
+            // also the starting best: anything farther is not a partner at all.
+            double best = limit;
+            bool found = false;
+            // One query may not look at more stored points than this.  A mesh that
+            // stacks thousands of vertices on one spot would otherwise make a
+            // single cell cost O(n) per query, which is exactly the quadratic case
+            // this function exists to avoid; and in a cluster that dense the
+            // nearest neighbour turns up long before the budget runs out.
+            size_t budget = 4096;
+            for (int ring = 0; ring <= ringLimit; ++ring) {
+                buckets.clear();
+                for (int dx = -ring; dx <= ring; ++dx) {
+                    for (int dy = -ring; dy <= ring; ++dy) {
+                        for (int dz = -ring; dz <= ring; ++dz) {
+                            // Only the shell: the previous rings already visited
+                            // the interior cells.
+                            if (ring > 0 && dx > -ring && dx < ring
+                                && dy > -ring && dy < ring && dz > -ring && dz < ring)
+                                continue;
+                            GridCell cell;
+                            cell.x = baseX + dx;
+                            cell.y = baseY + dy;
+                            cell.z = baseZ + dz;
+                            const auto bucket = grid.find(cell);
+                            if (bucket != grid.end())
+                                buckets.push_back(&bucket->second);
+                        }
+                    }
+                }
+                bool done = false;
+                for (const std::vector<size_t>* bucket : buckets) {
+                    for (const size_t candidate : *bucket) {
+                        if (0 == budget) {
+                            done = true;
+                            break;
+                        }
+                        --budget;
+                        const double distance = (vertices[candidate] - mirrored).length();
+                        if (distance <= best) {
+                            best = distance;
+                            found = true;
+                            // Distance zero cannot be beaten, and stopping here is
+                            // what keeps a storm of coincident vertices cheap: the
+                            // whole bucket would otherwise be walked for nothing.
+                            if (0.0 == best) {
+                                done = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (done)
+                        break;
+                }
+                if (done)
+                    break;
+                // Everything beyond ring r is at least r * cellSize away from the
+                // query point, so a match closer than that cannot be beaten.
+                if (found && best <= (double)ring * cellSize)
+                    break;
+            }
+            if (!found)
+                continue;
+            deviation = best;
+        }
+        ++check.matchedVertices;
+        deviationSum += deviation;
+        check.maxDeviation = std::max(check.maxDeviation, deviation);
+    }
+    check.matchPct = 100.0 * (double)check.matchedVertices / (double)check.consideredVertices;
+    if (check.matchedVertices > 0)
+        check.meanDeviation = deviationSum / (double)check.matchedVertices;
+    return check;
+}
+
+SymmetrySnapStats snapToPlane(std::vector<Vector3>* vertices, int axis,
+    double plane, double tolerance)
+{
+    SymmetrySnapStats stats;
+    if (nullptr == vertices || vertices->empty() || axis < 1 || axis > 3)
+        return stats;
+    const size_t axisIndex = (size_t)(axis - 1);
+    // A negative or NaN tolerance means "nothing is close enough"; clamping it to
+    // zero keeps that meaning instead of turning the comparison into a tautology.
+    const double limit = (tolerance > 0.0) ? tolerance : 0.0;
+    bool firstSnap = true;
+    for (auto& vertex : *vertices) {
+        const double distance = std::fabs(vertex[axisIndex] - plane);
+        // NaN distances fall out here too, which is what keeps a broken vertex
+        // from being written to; the other components are never touched at all.
+        if (!(distance <= limit))
+            continue;
+        vertex[axisIndex] = plane;
+        ++stats.snappedVertices;
+        ++stats.movedVertices;
+        if (firstSnap) {
+            stats.maxSnap = distance;
+            stats.minSnap = distance;
+            firstSnap = false;
+        } else {
+            stats.maxSnap = std::max(stats.maxSnap, distance);
+            stats.minSnap = std::min(stats.minSnap, distance);
+        }
+    }
+    return stats;
 }
 
 }

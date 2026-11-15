@@ -248,12 +248,13 @@ QualityStats collectQuality(const std::vector<Vector3>& vertices,
 {
     QualityStats quality;
 
-    // Thresholds are relative to the model with an absolute floor: a mesh scaled
-    // to nothing, or a caller that has no bounding box yet, still needs an
-    // epsilon that is not zero, and a fixed absolute epsilon would call every edge
-    // of a 2 m model degenerate the moment the same mesh is exported in mm.
+    // "Zero length" means zero: the number is compared against another tool's count
+    // of collapsed edges, and a threshold that moves with the model size makes the
+    // two disagree on every mesh that is not authored at 1 m.  The weld pass that
+    // removes them works with a relative epsilon of its own; this is the report, so
+    // it says what a collapsed edge is in any unit.
     const double diagonal = (bboxDiagonal > 0.0) ? bboxDiagonal : 0.0;
-    const double zeroLengthThreshold = std::max(1e-12, 1e-6 * diagonal);
+    const double zeroLengthThreshold = 1e-12;
     const double zeroAreaThreshold = std::max(1e-18, 1e-14 * diagonal * diagonal);
 
     // One table serves both the topology and the geometry: an edge's multiplicity

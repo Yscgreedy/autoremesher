@@ -25,6 +25,7 @@
 #include <axisalignedboundingbox.h>
 #include <axisalignedboundingboxtree.h>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <map>
 #include <set>
@@ -49,6 +50,13 @@ public:
     const std::vector<Vector3>& remeshedVertices()
     {
         return m_remeshedVertices;
+    }
+
+    // One UV per remeshed vertex, in the same order as remeshedVertices(); empty
+    // when any pass could not keep it in step.
+    const std::vector<Vector2>& remeshedVertexUvs() const
+    {
+        return m_remeshedVertexUvs;
     }
 
     const std::vector<std::vector<size_t>>& remeshedQuads()
@@ -189,6 +197,10 @@ private:
     const std::vector<std::vector<size_t>>* m_triangles = nullptr;
     const std::vector<std::vector<Vector2>>* m_triangleUvs = nullptr;
     std::vector<Vector3> m_remeshedVertices;
+    // Parallel to m_remeshedVertices: the uv the cover gave the cross point each
+    // output vertex came from.  Kept in step by the helpers at the end of this
+    // class, never by a pass writing it directly.
+    std::vector<Vector2> m_remeshedVertexUvs;
     std::vector<std::vector<size_t>> m_remeshedPolygons;
     std::vector<std::pair<Vector3, Vector3>> m_extractedConnections;
     std::vector<uint8_t> m_extractedConnectionMoved;
@@ -237,22 +249,28 @@ private:
 
     void extractConnections(std::vector<Vector3>* crossPoints,
         std::vector<size_t>* sourceTriangles,
+        std::vector<Vector2>* crossPointUvs,
         std::set<std::pair<size_t, size_t>>* connections);
     void holdSingularLines(std::vector<Vector3>* crossPoints,
         std::vector<size_t>* sourceTriangles,
+        std::vector<Vector2>* crossPointUvs,
         std::set<std::pair<size_t, size_t>>* connections);
     void extractEdges(const std::set<std::pair<size_t, size_t>>& connections,
         std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap);
     bool collapseShortEdges(std::vector<Vector3>* crossPoints,
+        std::vector<Vector2>* crossPointUvs,
         std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap);
     bool collapseTriangles(std::vector<Vector3>* crossPoints,
+        std::vector<Vector2>* crossPointUvs,
         std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap);
     bool removeSingleEndpoints(std::vector<Vector3>* crossPoints,
         std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap);
     void collapseEdge(std::vector<Vector3>* crossPoints,
+        std::vector<Vector2>* crossPointUvs,
         std::unordered_map<size_t, std::unordered_set<size_t>>* edgeConnectMap,
         const std::pair<size_t, size_t>& edge);
     void extractMesh(std::vector<Vector3>& points,
+        const std::vector<Vector2>& pointUvs,
         const std::vector<size_t>& pointSourceTriangles,
         std::unordered_map<size_t, std::unordered_set<size_t>>& edgeConnectMap,
         std::vector<std::vector<size_t>>* quads);
@@ -293,6 +311,199 @@ private:
             return;
         ++m_extractionStats.holesFilled;
         m_extractionStats.holeFacesAdded += facesAdded;
+    }
+    // --- uv bookkeeping -------------------------------------------------------
+    // Every pass that adds, drops or renumbers a remeshed vertex calls one of
+    // these in the same place the vertex array changes, so m_remeshedVertexUvs
+    // stays index aligned with m_remeshedVertices through the whole extract()
+    // run.  A pass that finds the two already out of step clears the uv array:
+    // a missing uv degrades to "no uv", a wrong one would cut a seam through the
+    // middle of a face.
+    Vector2 remeshedVertexUv(size_t vertex) const
+    {
+        if (vertex >= m_remeshedVertexUvs.size())
+            return Vector2();
+        return m_remeshedVertexUvs[vertex];
+    }
+    // Linear uv at a point that lies on the segment between two existing points,
+    // taken from where the point falls along that segment.
+    static Vector2 uvOnSegment(const std::vector<Vector3>& positions,
+        const std::vector<Vector2>& uvs, size_t first, size_t second,
+        const Vector3& position)
+    {
+        Vector2 firstUv;
+        Vector2 secondUv;
+        if (first < uvs.size())
+            firstUv = uvs[first];
+        if (second < uvs.size())
+            secondUv = uvs[second];
+        const Vector3 span = positions[second] - positions[first];
+        const double spanSquared = Vector3::dotProduct(span, span);
+        double ratio = 0.5;
+        if (!Double::isZero(spanSquared))
+            ratio = Vector3::dotProduct(position - positions[first], span) / spanSquared;
+        if (ratio < 0.0)
+            ratio = 0.0;
+        else if (ratio > 1.0)
+            ratio = 1.0;
+        return firstUv * (1.0 - ratio) + secondUv * ratio;
+    }
+    // Called right after m_remeshedVertices grew by one.
+    void pushRemeshedVertexUv(const Vector2& uv)
+    {
+        if (m_remeshedVertexUvs.size() + 1 != m_remeshedVertices.size()) {
+            m_remeshedVertexUvs.clear();
+            return;
+        }
+        m_remeshedVertexUvs.push_back(uv);
+    }
+    // Called right after m_remeshedVertices lost its last entry.
+    void dropRemeshedVertexUv()
+    {
+        if (m_remeshedVertexUvs.size() != m_remeshedVertices.size() + 1) {
+            m_remeshedVertexUvs.clear();
+            return;
+        }
+        m_remeshedVertexUvs.pop_back();
+    }
+    // Called after m_remeshedVertices was resized down to count.
+    void truncateRemeshedVertexUvs(size_t count)
+    {
+        if (m_remeshedVertexUvs.size() < count) {
+            m_remeshedVertexUvs.clear();
+            return;
+        }
+        m_remeshedVertexUvs.resize(count);
+    }
+    // Overwrites one uv, after a merge moved that vertex onto the average of the
+    // pair it absorbed.
+    void setRemeshedVertexUv(size_t vertex, const Vector2& uv)
+    {
+        if (vertex >= m_remeshedVertexUvs.size()) {
+            m_remeshedVertexUvs.clear();
+            return;
+        }
+        m_remeshedVertexUvs[vertex] = uv;
+    }
+    // Applies an old index to new index table (max size_t for a dropped vertex)
+    // to the uv array, which still holds the order before the compaction.
+    void remapRemeshedVertexUvs(const std::vector<size_t>& oldToNew)
+    {
+        if (m_remeshedVertexUvs.size() != oldToNew.size()) {
+            m_remeshedVertexUvs.clear();
+            return;
+        }
+        std::vector<Vector2> remapped(m_remeshedVertices.size(), Vector2());
+        for (size_t old = 0; old < oldToNew.size(); ++old) {
+            if (oldToNew[old] >= remapped.size())
+                continue;
+            remapped[oldToNew[old]] = m_remeshedVertexUvs[old];
+        }
+        m_remeshedVertexUvs = std::move(remapped);
+    }
+    // compaction, ascending order: extract() itself drops the vertices no face
+    // refers to any more and rewrites its own faces from oldToNew.
+    void compactRemeshedVerticesAscending(const std::set<size_t>& usedVertices,
+        std::unordered_map<size_t, size_t>* oldToNew)
+    {
+        std::vector<Vector3> compactedVertices;
+        std::vector<Vector2> compactedUvs;
+        const bool uvsInStep = m_remeshedVertexUvs.size() == m_remeshedVertices.size();
+        compactedVertices.reserve(usedVertices.size());
+        if (uvsInStep)
+            compactedUvs.reserve(usedVertices.size());
+        for (const auto& oldIndex : usedVertices) {
+            (*oldToNew)[oldIndex] = compactedVertices.size();
+            compactedVertices.push_back(m_remeshedVertices[oldIndex]);
+            if (uvsInStep)
+                compactedUvs.push_back(m_remeshedVertexUvs[oldIndex]);
+        }
+        m_remeshedVertices = std::move(compactedVertices);
+        if (uvsInStep)
+            m_remeshedVertexUvs = std::move(compactedUvs);
+        else
+            m_remeshedVertexUvs.clear();
+    }
+    // Applies the ascending used-mask remap the patch pass builds to the uv
+    // array, after it replaced m_remeshedVertices with the compacted vertices.
+    void remapRemeshedVertexUvs(const std::vector<char>& used,
+        const std::vector<size_t>& oldToNew)
+    {
+        if (m_remeshedVertexUvs.size() != used.size()) {
+            m_remeshedVertexUvs.clear();
+            return;
+        }
+        std::vector<Vector2> remapped(m_remeshedVertices.size(), Vector2());
+        for (size_t old = 0; old < used.size(); ++old) {
+            if (!used[old])
+                continue;
+            remapped[oldToNew[old]] = m_remeshedVertexUvs[old];
+        }
+        m_remeshedVertexUvs = std::move(remapped);
+    }
+    // compaction, first-use order: the four cleanup passes that keep using the
+    // table afterwards all share this one.
+    std::map<size_t, size_t> compactRemeshedVertices()
+    {
+        std::map<size_t, size_t> oldToNew;
+        std::vector<Vector3> compactedVertices;
+        std::vector<Vector2> compactedUvs;
+        const bool uvsInStep = m_remeshedVertexUvs.size() == m_remeshedVertices.size();
+        compactedVertices.reserve(m_remeshedVertices.size());
+        if (uvsInStep)
+            compactedUvs.reserve(m_remeshedVertices.size());
+        for (const auto& face : m_remeshedPolygons) {
+            for (const auto vertex : face) {
+                if (oldToNew.end() != oldToNew.find(vertex))
+                    continue;
+                oldToNew[vertex] = compactedVertices.size();
+                compactedVertices.push_back(m_remeshedVertices[vertex]);
+                if (uvsInStep)
+                    compactedUvs.push_back(m_remeshedVertexUvs[vertex]);
+            }
+        }
+        for (auto& face : m_remeshedPolygons) {
+            for (auto& vertex : face)
+                vertex = oldToNew.at(vertex);
+        }
+        m_remeshedVertices = std::move(compactedVertices);
+        if (uvsInStep)
+            m_remeshedVertexUvs = std::move(compactedUvs);
+        else
+            m_remeshedVertexUvs.clear();
+        return oldToNew;
+    }
+    // compaction, first-use order, reporting the per old index table (max size_t
+    // for a vertex that went) for the passes that remap their own vertex lists.
+    std::vector<size_t> compactRemeshedVerticesIndexed()
+    {
+        const size_t absent = std::numeric_limits<size_t>::max();
+        std::vector<size_t> oldToNew(m_remeshedVertices.size(), absent);
+        std::vector<Vector3> compactedVertices;
+        std::vector<Vector2> compactedUvs;
+        const bool uvsInStep = m_remeshedVertexUvs.size() == m_remeshedVertices.size();
+        compactedVertices.reserve(m_remeshedVertices.size());
+        if (uvsInStep)
+            compactedUvs.reserve(m_remeshedVertices.size());
+        for (const auto& face : m_remeshedPolygons) {
+            for (const auto vertex : face) {
+                if (absent != oldToNew[vertex])
+                    continue;
+                oldToNew[vertex] = compactedVertices.size();
+                compactedVertices.push_back(m_remeshedVertices[vertex]);
+                if (uvsInStep)
+                    compactedUvs.push_back(m_remeshedVertexUvs[vertex]);
+            }
+        }
+        for (auto& face : m_remeshedPolygons)
+            for (auto& vertex : face)
+                vertex = oldToNew[vertex];
+        m_remeshedVertices = std::move(compactedVertices);
+        if (uvsInStep)
+            m_remeshedVertexUvs = std::move(compactedUvs);
+        else
+            m_remeshedVertexUvs.clear();
+        return oldToNew;
     }
     void fixHoles();
 };

@@ -26,15 +26,15 @@
 #include <AutoRemesher/QuadExtractor>
 #include <AutoRemesher/UvCharts>
 #include <AutoRemesher/UvTransfer>
-#include <core/base/logging.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <core/base/logging.h>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
-#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1013,9 +1013,7 @@ bool AutoRemesher::remesh()
         for (size_t i = 0; i < face.size(); ++i) {
             const Vector3& current = vertices[face[i]];
             const Vector3& following = vertices[face[(i + 1) % face.size()]];
-            normal = normal + Vector3((current.y() - following.y()) * (current.z() + following.z()),
-                                      (current.z() - following.z()) * (current.x() + following.x()),
-                                      (current.x() - following.x()) * (current.y() + following.y()));
+            normal = normal + Vector3((current.y() - following.y()) * (current.z() + following.z()), (current.z() - following.z()) * (current.x() + following.x()), (current.x() - following.x()) * (current.y() + following.y()));
         }
         if (!(normal.lengthSquared() > 0.0))
             return result;
@@ -1449,7 +1447,6 @@ bool AutoRemesher::remesh()
     return true;
 }
 
-
 void AutoRemesher::analyzeInput()
 {
     if (m_inputAnalyzed)
@@ -1460,6 +1457,5 @@ void AutoRemesher::analyzeInput()
     m_inputAnalysisMilliseconds = (double)std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
     m_inputAnalyzed = true;
 }
-
 
 }

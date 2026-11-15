@@ -32,47 +32,47 @@ namespace AutoRemesher {
 // the layering gate R4 asks for.
 namespace Log {
 
-enum Level {
-    Silent = 0,
-    Normal = 1,
-    Debug = 2,
-};
+    enum Level {
+        Silent = 0,
+        Normal = 1,
+        Debug = 2,
+    };
 
-// One function per message; level tells the sink how loud the line is.
-typedef void (*Sink)(int level, const char* message);
+    // One function per message; level tells the sink how loud the line is.
+    typedef void (*Sink)(int level, const char* message);
 
-inline Sink& sink()
-{
-    static Sink value = nullptr;
-    return value;
-}
+    inline Sink& sink()
+    {
+        static Sink value = nullptr;
+        return value;
+    }
 
-inline int& level()
-{
-    static int value = Normal;
-    return value;
-}
+    inline int& level()
+    {
+        static int value = Normal;
+        return value;
+    }
 
-inline void setSink(Sink value)
-{
-    sink() = value;
-}
+    inline void setSink(Sink value)
+    {
+        sink() = value;
+    }
 
-inline void setLevel(int value)
-{
-    level() = value;
-}
+    inline void setLevel(int value)
+    {
+        level() = value;
+    }
 
-inline bool enabled(int neededLevel)
-{
-    return nullptr != sink() && level() >= neededLevel;
-}
+    inline bool enabled(int neededLevel)
+    {
+        return nullptr != sink() && level() >= neededLevel;
+    }
 
-inline void write(int neededLevel, const std::string& message)
-{
-    if (enabled(neededLevel))
-        sink()(neededLevel, message.c_str());
-}
+    inline void write(int neededLevel, const std::string& message)
+    {
+        if (enabled(neededLevel))
+            sink()(neededLevel, message.c_str());
+    }
 
 } // namespace Log
 

@@ -26,11 +26,10 @@
 #include <core/base/logging.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
-#include <cmath>
-#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -903,7 +902,7 @@ bool QuadParameterizer::parameterize(const std::vector<Vector3>& vertices,
             break;
         const double boundaryLossCells = boundaryPerimeter / (2.0 * scale);
         if (boundaryLossCells > 0.5 * uvArea)
-            break;  // the model does not apply below this size
+            break; // the model does not apply below this size
         // Extraction also loses cells at seams and around irregular vertices; on
         // the test models that residual is a stable 4-5% on top of the boundary
         // strip, so judge the attempt by the calibrated estimate rather than by

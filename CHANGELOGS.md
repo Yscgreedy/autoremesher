@@ -1,4 +1,11 @@
 Unreleased
+- Regression (2026-11-15): geometry is unchanged against the pre-UV-v2 anchors -
+  body_vox and body_clean byte-identical in the v/f channels, head_in within
+  4.4e-16 - while the full-file sha moved because the UV channel changed.  The
+  anchors now record a geometry sha (the real regression criterion) next to the
+  full sha, and the docs carry the structural baseline measured with
+  tools/metrics: body_vox 99.39% quads / 96.89% valence-4 / dev p95 8.9e-4,
+  body_clean 99.59% / 97.83%, head_in 95.82% / 81.61%
 - Diagnose the input: the core counts boundary edges/loops, non-manifold edges,
   components and degenerate faces before the run, and the CLI surfaces them as
   warnings (JSON `warning` events and stderr lines) instead of starting a run that

@@ -61,3 +61,10 @@ gui/dist/
 # which left the Go GUI unbuildable from a fresh clone.
 !gui/go.mod
 !gui/go.sum
+
+# Python bytecode caches (tools/ and scripts/ utilities)
+__pycache__/
+*.py[cod]
+
+# Packaged Linux binaries that must not be vendored
+*.AppImage

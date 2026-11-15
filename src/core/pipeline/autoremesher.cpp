@@ -911,6 +911,8 @@ bool AutoRemesher::remesh()
                         thread.remesher->setProjectedHoleCaps(true);
                     if (thread.autoRemesher->m_localRemesh)
                         thread.remesher->setLocalRemesh(true);
+                    if (thread.autoRemesher->m_maximumAspect > 0.0)
+                        thread.remesher->setMaximumAspect(thread.autoRemesher->m_maximumAspect);
                     if (thread.autoRemesher->m_relativePositionTolerance) {
                         // One thousandth of the island's target edge length: fine
                         // enough to keep distinct cross points apart, coarse enough
@@ -1263,6 +1265,16 @@ bool AutoRemesher::remesh()
                 for (auto& uv : faceUvs)
                     normalize(&uv);
         }
+    }
+
+    // The global normalise above only guarantees "everything fits"; it does not
+    // stop two charts from occupying the same square, which is exactly what makes
+    // a bake smear.  Pack chart by chart afterwards, and keep the numbers so the
+    // report can say what happened.
+    m_uvPackResult = UvPackResult();
+    if (m_exportUvs && m_uvPacking && !m_remeshedFaceUvs.empty()) {
+        m_uvPackResult = packUvCharts(m_remeshedQuads, &m_remeshedFaceUvs,
+            &m_remeshedVertexUvs, 0.01);
     }
 
     // Symmetry is applied last, on the merged mesh: the cut and the mirror have to

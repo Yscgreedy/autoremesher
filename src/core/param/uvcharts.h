@@ -123,6 +123,43 @@ struct UvStats {
 // feeds chartCount.  Faces without a matching UV list are counted in
 // strayTriangles and otherwise ignored, so a partially unwrapped mesh still
 // yields usable numbers for the part that is unwrapped.
+
+// Packs a UV layout so it can actually be baked into one texture.
+//
+// The remesher's own layout gives every island a horizontal strip and normalises
+// the whole mesh by its largest span, which leaves the charts of one mesh stacked
+// on top of each other - measured on a shoe, every mode overlapped (corner 55%,
+// vertex 100%, hybrid 62%, seam 58% of the covered cells).  A baker cannot use
+// that: two faces fighting over one texel smear each other.
+//
+// This pass groups faces into charts by their own UVs (two faces belong to one
+// chart when their UVs agree along the edge they share), then gives each chart
+// one rigid scale+translate, shelf-packs the chart boxes by decreasing height and
+// scales the result into [0,1]^2 with a margin.  Charts never overlap, so the
+// measurement after this call reports area <= 1 and overlap ~ 0 for the corner
+// channel.
+//
+// Constraints that matter:
+// - Only faceUvs is transformed.  A vertex shared by two charts cannot carry two
+//   UVs, so the per-vertex channel (vertex mode) stays overlapping by
+//   construction - that is what --uv-mode seam exists for.  vertexUvs, when
+//   given, is re-derived from the packed corners only where every corner of that
+//   vertex agrees, which is exactly the interior of a chart.
+// - Deterministic: charts are numbered in face order and sorted by height with the
+//   chart id as tie break, so the same mesh always packs the same way.
+struct UvPackResult {
+    size_t chartCount = 0;
+    size_t packedCharts = 0;
+    double scale = 1.0;
+    double fillRatio = 0.0; // chart box area / used pack box area
+    bool ok = false;
+};
+
+UvPackResult packUvCharts(const std::vector<std::vector<size_t>>& faces,
+    std::vector<std::vector<Vector2>>* faceUvs,
+    std::vector<Vector2>* vertexUvs,
+    double margin);
+
 UvStats collectUvStats(const std::vector<Vector3>& vertices,
     const std::vector<std::vector<size_t>>& faces,
     const std::vector<std::vector<Vector2>>& faceUvs,

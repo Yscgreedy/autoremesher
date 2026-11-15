@@ -90,6 +90,19 @@ public:
         size_t degenerateFacesRemoved = 0;
         size_t weldedVertices = 0;
         size_t nonManifoldFacesRemoved = 0;
+        // The aspect clamp, counted on the run that produced this mesh:
+        //   - aspectClampedEdges: collapses it applied, one per face per round;
+        //   - aspectClampedFaces: faces it had to act on;
+        //   - aspectRejectedFaces: over-long faces it left alone because merging
+        //     their longest side would have given some edge a third face;
+        //   - facesTooLongRemaining: quads still over the threshold when it gave up.
+        // A clamp turns a quad into a triangle (or drops a face it flattens), so
+        // quad_ratio moves even when nothing is rejected: the two read differently
+        // on purpose.
+        size_t aspectClampedEdges = 0;
+        size_t aspectClampedFaces = 0;
+        size_t aspectRejectedFaces = 0;
+        size_t facesTooLongRemaining = 0;
     };
 
     // Statistics of the mesh extract() produced; updated by extract() itself, so
@@ -160,6 +173,27 @@ public:
         m_projectedHoleCaps = projected;
     }
 
+    // Hole filling decides by edge count, and an edge count only describes a
+    // physical hole when the output carries the edge length the remesher aimed at.
+    // These two numbers are therefore read as "hole perimeter in target edges":
+    // 8 and 65 reproduce the historical fixed counts exactly while
+    // setHoleTargetEdgeLength() is left at 0, and follow the mesh density once a
+    // caller states the length it planned for.
+    void setHoleLengthThresholds(double smallEdges, double largeEdges)
+    {
+        m_holeSmallEdges = smallEdges > 0.0 ? smallEdges : 0.0;
+        m_holeLargeEdges = largeEdges > 0.0 ? largeEdges : 0.0;
+    }
+
+    // The edge length the remesher was aiming at, in the model's own units (the
+    // IslandRemesher voxel size).  Zero keeps the thresholds as raw edge counts;
+    // a positive length turns them into a length that survives a model authored in
+    // other units, because the ratio below is unitless.
+    void setHoleTargetEdgeLength(double targetEdgeLength)
+    {
+        m_holeTargetEdgeLength = targetEdgeLength > 0.0 ? targetEdgeLength : 0.0;
+    }
+
     // Local topology optimisation: merges triangle pairs into quads and splits
     // the larger faces, judged by one global energy (face size + vertex valence)
     // instead of the per pass heuristics.
@@ -169,6 +203,15 @@ public:
     void setCleanDegenerate(bool enabled)
     {
         m_cleanDegenerate = enabled;
+    }
+
+    // Collapses a quad whose longest side over its shortest exceeds this, along
+    // that longest side; 0 keeps every face the topology passes produced.  It is
+    // part of the same switch as setCleanDegenerate(): an output the caller asked
+    // to be usable rather than merely well connected, so both go off together.
+    void setMaximumAspect(double maximumAspect)
+    {
+        m_maximumAspect = maximumAspect;
     }
 
     void setLocalRemesh(bool enabled)
@@ -229,12 +272,23 @@ private:
     bool m_projectedHoleCaps = false;
     bool m_localRemesh = false;
     bool m_cleanDegenerate = true;
+    double m_maximumAspect = 0.0;
+    double m_holeSmallEdges = 8.0;
+    double m_holeLargeEdges = 65.0;
+    double m_holeTargetEdgeLength = 0.0;
     // Filled by extract() and its hole/patch passes; see ExtractionStats.
     ExtractionStats m_extractionStats;
     ProgressHandler m_progressHandler;
     // Ear clipping over the loop's best fit plane followed by quad pairing; adds
-    // the faces it can and returns how many it added.
-    size_t fillHoleGraded(const std::vector<size_t>& hole);
+    // the faces it can and returns how many it added.  largeHoleEdges is the large
+    // hole threshold already converted to output edges, so the cap strategy and the
+    // decision to cap at all cannot drift apart.
+    size_t fillHoleGraded(const std::vector<size_t>& hole, double largeHoleEdges);
+    // Ratio between the edge length the remesher aimed at and the one the output
+    // actually came out with; 1.0 whenever the caller did not state a target, which
+    // is what keeps the default hole thresholds counting raw edges.
+    double holeEdgeScale() const;
+    double remeshedMeanEdgeLength() const;
     // Snaps a point onto the source mesh (the input surface, which is complete
     // even where the output has a hole) so cap vertices follow the real surface.
     bool projectPointToSource(const Vector3& position, double radius, Vector3* projected);
@@ -323,6 +377,10 @@ private:
     // faces.  Everything downstream (statistics, the OBJ writer, the caller's
     // own measurement) then sees the same mesh.
     void validateRemeshedMesh();
+    // Merges the two ends of an over-long side and renumbers the faces that named
+    // the absorbed vertex, up to four rounds; runs from validateRemeshedMesh()'s
+    // caller so it sees a mesh the validate pass already made manifold.
+    void clampQuadAspect(double maximumAspect);
     void rebuildHalfEdges();
     // One hole really got its faces appended: counted, and the faces it added go
     // into the running total.  A pass that only re-walks a loop an earlier pass

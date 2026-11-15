@@ -22,6 +22,7 @@
 #include <AutoRemesher/UvCharts>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <utility>
@@ -305,6 +306,317 @@ namespace {
         }
     }
 
+}
+
+namespace {
+
+    // Union-find over face indices; the UV packing only needs "same chart or
+    // not", and a parent array is both faster and easier to make deterministic
+    // than a hash of chart members.
+    size_t findChartRoot(std::vector<size_t>& parent, size_t index)
+    {
+        size_t root = index;
+        while (parent[root] != root)
+            root = parent[root];
+        while (parent[index] != root) {
+            const size_t next = parent[index];
+            parent[index] = root;
+            index = next;
+        }
+        return root;
+    }
+
+    void uniteChart(std::vector<size_t>& parent, size_t first, size_t second)
+    {
+        const size_t firstRoot = findChartRoot(parent, first);
+        const size_t secondRoot = findChartRoot(parent, second);
+        if (firstRoot == secondRoot)
+            return;
+        // Smaller index wins, so the representative does not depend on the order
+        // the edges happened to be visited in.
+        if (firstRoot < secondRoot)
+            parent[secondRoot] = firstRoot;
+        else
+            parent[firstRoot] = secondRoot;
+    }
+
+} // namespace
+
+UvPackResult packUvCharts(const std::vector<std::vector<size_t>>& faces,
+    std::vector<std::vector<Vector2>>* faceUvs,
+    std::vector<Vector2>* vertexUvs,
+    double margin)
+{
+    UvPackResult result;
+    if (nullptr == faceUvs || faceUvs->size() != faces.size() || faces.empty())
+        return result;
+
+    // The two channels are compared on shared edges, so the tolerance has to be
+    // relative to the layout: a cover unit is one quad, and 1e-4 of the whole
+    // layout is far below a corner and far above the last-bit noise of two
+    // triangles that computed the same intersection point.
+    double minU = 0.0;
+    double maxU = 0.0;
+    double minV = 0.0;
+    double maxV = 0.0;
+    bool haveUv = false;
+    for (const auto& cornerUvs : *faceUvs) {
+        for (const auto& uv : cornerUvs) {
+            if (!std::isfinite(uv.x()) || !std::isfinite(uv.y()))
+                return result;
+            minU = haveUv ? std::min(minU, uv.x()) : uv.x();
+            maxU = haveUv ? std::max(maxU, uv.x()) : uv.x();
+            minV = haveUv ? std::min(minV, uv.y()) : uv.y();
+            maxV = haveUv ? std::max(maxV, uv.y()) : uv.y();
+            haveUv = true;
+        }
+    }
+    if (!haveUv)
+        return result;
+    const double diagonal = Vector2(maxU - minU, maxV - minV).length();
+    const double tolerance = std::max(1e-9, 1e-4 * (diagonal > 0.0 ? diagonal : 1.0));
+
+    // One entry per undirected edge: which face owns it and at which corner, so a
+    // shared edge can be compared without a second pass over both faces.
+    std::map<std::pair<size_t, size_t>, std::vector<std::pair<size_t, size_t>>> edgeOwners;
+    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+        const auto& face = faces[faceIndex];
+        if (face.size() < 3 || (*faceUvs)[faceIndex].size() != face.size())
+            continue;
+        for (size_t corner = 0; corner < face.size(); ++corner) {
+            const size_t first = face[corner];
+            const size_t second = face[(corner + 1) % face.size()];
+            const auto edge = first < second ? std::make_pair(first, second)
+                                             : std::make_pair(second, first);
+            edgeOwners[edge].push_back(std::make_pair(faceIndex, corner));
+        }
+    }
+
+    // Faces are grouped into charts through the UV translation that carries one
+    // face's UVs onto its neighbour's.  Corner UVs are per-triangle affine
+    // extrapolations of the cover, so neighbours agree only up to a whole cover
+    // cell: the translation is an integer vector.  Comparing the UVs directly,
+    // without allowing that offset, finds one chart per face - which packs without
+    // overlap but leaves a bake with a seam line on every edge.
+    // How close two faces have to place their shared edge to count as one chart.
+    // A quad's UV edge is one cover cell, so a tenth of a cell is well inside
+    // "same chart" and well outside the difference between two charts; the cell is
+    // estimated from the median shortest UV edge because the cover scale is not
+    // known at this point and a fixed epsilon is wrong in every other unit.
+    std::vector<double> shortestEdges;
+    shortestEdges.reserve(faces.size());
+    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+        const auto& face = faces[faceIndex];
+        const auto& cornerUvs = (*faceUvs)[faceIndex];
+        if (face.size() < 3 || cornerUvs.size() != face.size())
+            continue;
+        double shortest = std::numeric_limits<double>::max();
+        for (size_t corner = 0; corner < face.size(); ++corner)
+            shortest = std::min(shortest, (cornerUvs[(corner + 1) % face.size()] - cornerUvs[corner]).length());
+        if (shortest > 0.0 && std::isfinite(shortest))
+            shortestEdges.push_back(shortest);
+    }
+    double cellSize = 0.0;
+    if (!shortestEdges.empty()) {
+        std::sort(shortestEdges.begin(), shortestEdges.end());
+        cellSize = shortestEdges[shortestEdges.size() / 2];
+    }
+    const double chartTolerance = cellSize > 0.0 ? 0.15 * cellSize : tolerance;
+    std::vector<std::vector<std::pair<size_t, Vector2>>> neighbours(faces.size());
+    for (const auto& it : edgeOwners) {
+        if (it.second.size() != 2)
+            continue;
+        const size_t firstFace = it.second[0].first;
+        const size_t firstCorner = it.second[0].second;
+        const size_t secondFace = it.second[1].first;
+        const size_t secondCorner = it.second[1].second;
+        const auto& firstFaceRef = faces[firstFace];
+        const auto& secondFaceRef = faces[secondFace];
+        const auto& firstUvs = (*faceUvs)[firstFace];
+        const auto& secondUvs = (*faceUvs)[secondFace];
+        if (firstUvs.size() != firstFaceRef.size() || secondUvs.size() != secondFaceRef.size())
+            continue;
+        // The two faces walk the shared edge in opposite directions.
+        const size_t firstNext = (firstCorner + 1) % firstFaceRef.size();
+        const size_t secondNext = (secondCorner + 1) % secondFaceRef.size();
+        const Vector2 forward = secondUvs[secondNext] - firstUvs[firstCorner];
+        const Vector2 backward = secondUvs[secondCorner] - firstUvs[firstNext];
+        const Vector2 delta((forward.x() + backward.x()) * 0.5,
+            (forward.y() + backward.y()) * 0.5);
+        if (delta.length() > chartTolerance)
+            continue;
+        neighbours[firstFace].push_back(std::make_pair(secondFace, delta));
+        neighbours[secondFace].push_back(std::make_pair(firstFace, Vector2(-delta.x(), -delta.y())));
+    }
+
+    // Breadth-first over the adjacency, accumulating the offset that brings each
+    // face into its chart's frame.  Propagation from the chart's seed face keeps a
+    // chart's internal cell structure intact instead of flattening it.
+    std::vector<size_t> chartOfFace(faces.size(), (size_t)-1);
+    std::vector<Vector2> offsetOfFace(faces.size());
+    size_t chartCount = 0;
+    std::vector<size_t> pending;
+    for (size_t seed = 0; seed < faces.size(); ++seed) {
+        if (chartOfFace[seed] != (size_t)-1)
+            continue;
+        chartOfFace[seed] = chartCount;
+        pending.clear();
+        pending.push_back(seed);
+        while (!pending.empty()) {
+            const size_t current = pending.back();
+            pending.pop_back();
+            for (const auto& neighbour : neighbours[current]) {
+                if (chartOfFace[neighbour.first] != (size_t)-1)
+                    continue;
+                chartOfFace[neighbour.first] = chartCount;
+                offsetOfFace[neighbour.first] = Vector2(
+                    offsetOfFace[current].x() + neighbour.second.x(),
+                    offsetOfFace[current].y() + neighbour.second.y());
+                pending.push_back(neighbour.first);
+            }
+        }
+        ++chartCount;
+    }
+    result.chartCount = chartCount;
+
+    struct ChartBox {
+        double minU = 0.0;
+        double maxU = 0.0;
+        double minV = 0.0;
+        double maxV = 0.0;
+        bool valid = false;
+        double width() const { return maxU - minU; }
+        double height() const { return maxV - minV; }
+    };
+    std::vector<ChartBox> boxes(chartCount);
+    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+        ChartBox& box = boxes[chartOfFace[faceIndex]];
+        const auto& cornerUvs = (*faceUvs)[faceIndex];
+        const Vector2 offset = offsetOfFace[faceIndex];
+        for (const auto& uv : cornerUvs) {
+            const double u = uv.x() - offset.x();
+            const double v = uv.y() - offset.y();
+            if (!box.valid) {
+                box.minU = box.maxU = u;
+                box.minV = box.maxV = v;
+                box.valid = true;
+                continue;
+            }
+            box.minU = std::min(box.minU, u);
+            box.maxU = std::max(box.maxU, u);
+            box.minV = std::min(box.minV, v);
+            box.maxV = std::max(box.maxV, v);
+        }
+    }
+
+    // Shelf packing by decreasing height.  The bin width is the square root of the
+    // total box area inflated a little, so a layout of equal strips fills one row
+    // and a layout of one tall chart still opens a row for it.
+    std::vector<size_t> order;
+    order.reserve(boxes.size());
+    double totalArea = 0.0;
+    double widest = 0.0;
+    double tallest = 0.0;
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        if (!boxes[i].valid)
+            continue;
+        order.push_back(i);
+        totalArea += boxes[i].width() * boxes[i].height();
+        widest = std::max(widest, boxes[i].width());
+        tallest = std::max(tallest, boxes[i].height());
+    }
+    if (order.empty())
+        return result;
+    std::sort(order.begin(), order.end(), [&boxes](size_t first, size_t second) {
+        const double firstHeight = boxes[first].height();
+        const double secondHeight = boxes[second].height();
+        if (firstHeight != secondHeight)
+            return firstHeight > secondHeight;
+        return first < second;
+    });
+    const double gap = std::max(1e-9, margin);
+    const double packedArea = totalArea > 0.0 ? totalArea : 1.0;
+    double binWidth = std::max(widest, std::sqrt(packedArea) * 1.15);
+    binWidth = std::max(binWidth, 1e-9);
+
+    std::vector<Vector2> chartOffset(boxes.size());
+    std::vector<char> placed(boxes.size(), 0);
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    double shelfHeight = 0.0;
+    double usedWidth = 0.0;
+    for (const size_t chart : order) {
+        const ChartBox& box = boxes[chart];
+        const double width = box.width() + gap;
+        const double height = box.height() + gap;
+        if (cursorX > 0.0 && cursorX + width > binWidth) {
+            cursorY += shelfHeight;
+            cursorX = 0.0;
+            shelfHeight = 0.0;
+        }
+        chartOffset[chart] = Vector2(cursorX, cursorY);
+        placed[chart] = 1;
+        cursorX += width;
+        usedWidth = std::max(usedWidth, cursorX);
+        shelfHeight = std::max(shelfHeight, height);
+    }
+    const double usedHeight = cursorY + shelfHeight;
+    const double extent = std::max(std::max(usedWidth, usedHeight), 1e-9);
+    const double usable = std::max(1e-6, 1.0 - 2.0 * gap);
+    const double scale = usable / extent;
+
+    // Apply: every corner of a chart moves by the same scale and offset, which is
+    // what keeps the chart's internal shape (and its seam agreements) intact.
+    for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+        const size_t chart = chartOfFace[faceIndex];
+        const ChartBox& box = boxes[chart];
+        const Vector2 offset(gap + (chartOffset[chart].x() - box.minU) * scale,
+            gap + (chartOffset[chart].y() - box.minV) * scale);
+        auto& cornerUvs = (*faceUvs)[faceIndex];
+        const Vector2 faceOffset = offsetOfFace[faceIndex];
+        for (auto& uv : cornerUvs) {
+            const double u = uv.x() - faceOffset.x();
+            const double v = uv.y() - faceOffset.y();
+            uv = Vector2(u * scale + offset.x(), v * scale + offset.y());
+        }
+    }
+
+    // The per-vertex channel can only follow where a vertex sits inside one chart;
+    // a vertex shared by two charts has no single correct packed UV, and guessing
+    // one would put a fold in the seam.
+    if (nullptr != vertexUvs && !vertexUvs->empty()) {
+        std::vector<Vector2> accumulated(vertexUvs->size());
+        std::vector<size_t> references(vertexUvs->size(), 0);
+        for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+            const auto& face = faces[faceIndex];
+            const auto& cornerUvs = (*faceUvs)[faceIndex];
+            if (cornerUvs.size() != face.size())
+                continue;
+            for (size_t corner = 0; corner < face.size(); ++corner) {
+                const size_t vertex = face[corner];
+                if (vertex >= vertexUvs->size())
+                    continue;
+                if (0 == references[vertex])
+                    accumulated[vertex] = cornerUvs[corner];
+                references[vertex] = 1;
+            }
+        }
+        // First corner wins, never an average: averaging across two charts puts the
+        // vertex *between* them, and a quad spanning two chart boxes becomes a
+        // hundred times too large in UV space.  The per-vertex channel is only
+        // well defined when the mesh is cut at the chart seams (--uv-mode seam),
+        // which the caller turns on together with packing for exactly this reason.
+        for (size_t vertex = 0; vertex < vertexUvs->size(); ++vertex) {
+            if (references[vertex] > 0)
+                (*vertexUvs)[vertex] = accumulated[vertex];
+        }
+    }
+
+    result.packedCharts = order.size();
+    result.scale = scale;
+    result.fillRatio = (usedWidth * usedHeight) > 0.0 ? totalArea / (usedWidth * usedHeight) : 0.0;
+    result.ok = order.size() == boxes.size();
+    return result;
 }
 
 UvStats collectUvStats(const std::vector<Vector3>& vertices,
